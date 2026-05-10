@@ -61,8 +61,8 @@ def ask_groq(system, user, model="llama-3.3-70b-versatile", max_tokens=800):
     )
     response_content = chat_completion.choices[0].message.content
     return response_content
-# TO:
-model="llama-3.3-70b-versatile"
+
+
     client = Groq(api_key=GROQ_API_KEY)
     chat_completion = client.chat.completions.create(
         messages=[
