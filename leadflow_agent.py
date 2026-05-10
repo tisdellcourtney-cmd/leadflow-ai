@@ -8,7 +8,7 @@ import os
 import json
 import time
 import requests
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 from groq import Groq
 from serpapi import GoogleSearch
 from twilio.rest import Client as TwilioClient
@@ -170,7 +170,7 @@ def agent_capture_leads():
                         "rating":        result.get("rating", 0),
                         "reviews":       result.get("reviews", 0),
                         "status":        "New",
-                        "created_at":    datetime.now(UTC).isoformat(),
+                        "created_at":    datetime.now(timezone.utc).isoformat(),
                     }
 
                     saved = b44_create(lead_data)
