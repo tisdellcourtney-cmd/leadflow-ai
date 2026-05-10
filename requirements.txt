@@ -4,3 +4,4 @@ groq
 requests
 schedule
 flask
+gunicorn
