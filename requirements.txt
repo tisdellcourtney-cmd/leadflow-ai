@@ -1,7 +1,4 @@
 twilio
-google-search-results
+serpapi
 groq
 requests
-schedule
-flask
-gunicorn
