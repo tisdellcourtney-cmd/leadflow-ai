@@ -43,7 +43,26 @@ def b44_update(entity, record_id, data):
     r.raise_for_status()
     return r.json()
 
-def ask_groq(system, user, model="llama-3.1-8b-instant", max_tokens=800): # Updated model name
+def ask_groq(system, user, model="llama-3.3-70b-versatile", max_tokens=800):
+    client = Groq(api_key=GROQ_API_KEY)
+    chat_completion = client.chat.completions.create(
+        messages=[
+            {
+                "role": "system",
+                "content": system,
+            },
+            {
+                "role": "user",
+                "content": user,
+            }
+        ],
+        model=model,
+        max_tokens=max_tokens,
+    )
+    response_content = chat_completion.choices[0].message.content
+    return response_content
+# TO:
+model="llama-3.3-70b-versatile"
     client = Groq(api_key=GROQ_API_KEY)
     chat_completion = client.chat.completions.create(
         messages=[
