@@ -1,0 +1,25 @@
+services:
+  - type: worker
+    name: leadflow-ai
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python runner.py
+    envVars:
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_PHONE_NUMBER
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: SERPAPI_API_KEY
+        sync: false
+      - key: BASE44_API_KEY
+        sync: false
+      - key: BASE44_APP_ID
+        value: 69f5719e46c0732dec4f4b06
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: BASE44_ENTITY
+        value: Lead
