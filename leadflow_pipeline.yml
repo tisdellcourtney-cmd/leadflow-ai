@@ -2,7 +2,12 @@ name: LeadFlow AI v4 APEX — Daily Pipeline
 
 on:
   schedule:
-    - cron: "0 15 * * 1-5"       # 9:00 AM CST (UTC-6) Mon–Fri
+    # FIX #20 — Original cron "0 15 * * 1-5" = 15:00 UTC = 9 AM CST (UTC-6) in winter only.
+    # Alabama observes CDT (UTC-5) from March–November. "0 14 * * 1-5" = 14:00 UTC
+    # = 9 AM CDT in summer AND 8 AM CST in winter — acceptable tradeoff.
+    # If strict 9 AM CST/CDT is required, use a Lambda/Cloud Scheduler instead of
+    # GitHub Actions (which does not support DST-aware cron).
+    - cron: "0 14 * * 1-5"       # 9:00 AM CDT / 8:00 AM CST  Mon–Fri
   workflow_dispatch:
     inputs:
       dry_run:
@@ -12,7 +17,7 @@ on:
         type: choice
         options: ["false", "true"]
       city_filter:
-        description: "Restrict to one city, e.g. 'Birmingham AL' (blank = all)"
+        description: "Restrict to one city — must match exactly, e.g. 'Birmingham AL' (blank = all)"
         required: false
         default: ""
       groq_model:
