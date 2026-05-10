@@ -66,13 +66,38 @@ def ask_groq(system, user, model="llama-3.1-8b-instant", max_tokens=800): # Upda
 
 def agent_capture_leads():
     print("\n\U0001f50d [AGENT 1] Lead Capture Starting...")
-    raw_leads = [
-        {"name": "Mike's Auto Repair",     "phone": "205-555-0101", "email": "mike@autorepair.com",   "source": "Google Maps",          "city": "Birmingham", "business_type": "Auto Repair"},
-        {"name": "Keisha's Hair Studio",   "phone": "205-555-0102", "email": "keisha@hairstudio.com", "source": "Facebook Marketplace", "city": "Birmingham", "business_type": "Beauty Salon"},
-        {"name": "Troy's Lawn Service",    "phone": "205-555-0103", "email": "troy@lawnservice.com",  "source": "Google Maps",          "city": "Hoover",     "business_type": "Lawn Care"},
-        {"name": "Premier Cleaning Co",    "phone": "205-555-0104", "email": "info@premierclean.com", "source": "Facebook Marketplace", "city": "Vestavia",   "business_type": "Cleaning"},
-        {"name": "Darius Mobile Detailing","phone": "205-555-0105", "email": "darius@detailing.com",  "source": "Google Maps",          "city": "Birmingham", "business_type": "Auto Detailing"},
+from serpapi import GoogleSearch
+    
+    raw_leads = []
+    
+    search_queries = [
+        "auto repair shops Birmingham AL",
+        "hair salons Birmingham AL", 
+        "real estate agents Birmingham AL",
+        "insurance agents Birmingham AL",
+        "cleaning services Birmingham AL",
     ]
+    
+    for query in search_queries:
+        params = {
+            "engine": "google_maps",
+            "q": query,
+            "api_key": SERPAPI_API_KEY,
+            "type": "search"
+        }
+        
+        search = GoogleSearch(params)
+        results = search.get_dict()
+        
+        for result in results.get("local_results", [])[:2]:
+            raw_leads.append({
+                "name": result.get("title", "Unknown"),
+                "phone": result.get("phone", "N/A"),
+                "email": f"info@{result.get('title','lead').lower().replace(' ','')}. com",
+                "address": result.get("address", "Birmingham, AL"),
+                "website": result.get("website", "N/A"),
+                "rating": result.get("rating", "N/A"),
+            })
     captured = []
     for lead in raw_leads:
         lead["status"]     = "New"
