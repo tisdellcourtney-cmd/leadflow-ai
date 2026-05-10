@@ -1,259 +1,358 @@
-import asyncio
+"""
+LeadFlow AI - Production Agent v2.0
+Captures, qualifies, and assigns real business leads across Alabama.
+Runs daily via GitHub Actions at 9:00 AM CST.
+"""
+
 import os
 import json
+import time
 import requests
-from datetime import datetime, timedelta, UTC # Import UTC
-import time # Added import for time module
-import nest_asyncio # Re-added nest_asyncio
-from groq import Groq # Import Groq client
+from datetime import datetime, UTC
+from groq import Groq
+from serpapi import GoogleSearch
+from twilio.rest import Client as TwilioClient
 
-# ANTHROPIC_API_KEY is no longer used, switching to GROQ_API_KEY
-GROQ_API_KEY      = os.getenv("GROQ_API_KEY")
-BASE44_APP_ID     = os.getenv("BASE44_APP_ID").strip() # Added .strip()
-BASE44_API_KEY    = os.getenv("BASE44_API_KEY").strip() # Added .strip()
-BASE44_API_URL    = f"https://api.base44.app/api/apps/{BASE44_APP_ID}/entities"
+# ── Credentials ──────────────────────────────────────────────────────────────
+GROQ_API_KEY    = os.getenv("GROQ_API_KEY", "").strip()
+SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY", "").strip()
+BASE44_API_KEY  = os.getenv("BASE44_API_KEY", "").strip()
+BASE44_APP_ID   = os.getenv("BASE44_APP_ID", "69f5719e46c0732dec4f4b06").strip()
+TWILIO_SID      = os.getenv("TWILIO_ACCOUNT_SID", "").strip()
+TWILIO_TOKEN    = os.getenv("TWILIO_AUTH_TOKEN", "").strip()
+TWILIO_PHONE    = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
+GROQ_MODEL      = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+BASE44_ENTITY   = os.getenv("BASE44_ENTITY", "Lead").strip()
 
-HEADERS = {
-    "Content-Type": "application/json",
-    "api_key": BASE44_API_KEY
+BASE44_URL = f"https://api.base44.com/v1/apps/{BASE44_APP_ID}/entities/{BASE44_ENTITY}"
+HEADERS    = {
+    "ApiKey": BASE44_API_KEY,
+    "Content-Type": "application/json"
 }
 
-def b44_list(entity, filters=None):
-    url = f"{BASE44_API_URL}/{entity}"
-    params = {}
-    if filters:
-        params["filters"] = json.dumps(filters)
-    print(f"[DEBUG] b44_list URL: {url}, Params: {params}") # Debug print
-    r = requests.get(url, headers=HEADERS, params=params)
-    r.raise_for_status()
-    return r.json()
+# ── Target Markets ────────────────────────────────────────────────────────────
+CITIES = [
+    "Birmingham AL",
+    "Huntsville AL",
+    "Montgomery AL",
+]
 
-def b44_create(entity, data):
-    url = f"{BASE44_API_URL}/{entity}"
-    print(f"[DEBUG] Sending to b44_create: Entity={entity}, Data={json.dumps(data)}") # Debug print
-    r = requests.post(url, headers=HEADERS, json=data)
-    r.raise_for_status()
-    response_data = r.json()
-    print(f"[DEBUG] Received from b44_create: {json.dumps(response_data)}") # Debug print
-    return response_data
+BUSINESS_TYPES = [
+    "auto repair shops",
+    "hair salons",
+    "real estate agents",
+    "insurance agents",
+    "cleaning services",
+    "restaurants",
+    "dental offices",
+    "HVAC services",
+]
 
-def b44_update(entity, record_id, data):
-    url = f"{BASE44_API_URL}/{entity}/{record_id}"
-    r = requests.put(url, headers=HEADERS, json=data)
-    r.raise_for_status()
-    return r.json()
+LEADS_PER_QUERY = 5
 
-def ask_groq(system, user, model="llama-3.3-70b-versatile", max_tokens=800):
-    client = Groq(api_key=GROQ_API_KEY)
-    chat_completion = client.chat.completions.create(
-        messages=[
-            {
-                "role": "system",
-                "content": system,
-            },
-            {
-                "role": "user",
-                "content": user,
-            }
-        ],
-        model=model,
-        max_tokens=max_tokens,
-    )
-    response_content = chat_completion.choices[0].message.content
-    return response_content
+SALES_REPS = [
+    {"id": "rep_1", "name": "Alice"},
+    {"id": "rep_2", "name": "Bob"},
+    {"id": "rep_3", "name": "Carol"},
+]
 
+# ── Startup Credential Check ──────────────────────────────────────────────────
+def check_credentials():
+    print("\n=== CREDENTIAL CHECK ===")
+    required = {
+        "GROQ_API_KEY":        GROQ_API_KEY,
+        "SERPAPI_API_KEY":     SERPAPI_API_KEY,
+        "BASE44_API_KEY":      BASE44_API_KEY,
+        "TWILIO_ACCOUNT_SID":  TWILIO_SID,
+        "TWILIO_AUTH_TOKEN":   TWILIO_TOKEN,
+        "TWILIO_PHONE_NUMBER": TWILIO_PHONE,
+    }
+    all_good = True
+    for key, val in required.items():
+        if not val:
+            print(f"❌ Missing: {key}")
+            all_good = False
+        else:
+            print(f"✅ {key}: {val[:6]}...")
+    return all_good
 
-    client = Groq(api_key=GROQ_API_KEY)
-    chat_completion = client.chat.completions.create(
-        messages=[
-            {
-                "role": "system",
-                "content": system,
-            },
-            {
-                "role": "user",
-                "content": user,
-            }
-        ],
-        model=model,
-        temperature=0.0,
-        max_tokens=max_tokens,
-    )
-    response_content = chat_completion.choices[0].message.content
-    print(f"[DEBUG_GROQ] Groq response: {response_content}")
-    return response_content
+# ── Groq AI ───────────────────────────────────────────────────────────────────
+def ask_groq(system, user, max_tokens=800):
+    try:
+        client = Groq(api_key=GROQ_API_KEY)
+        response = client.chat.completions.create(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user",   "content": user},
+            ],
+            model=GROQ_MODEL,
+            max_tokens=max_tokens,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        print(f"❌ Groq error: {e}")
+        return None
 
+# ── Base44 Operations ─────────────────────────────────────────────────────────
+def b44_create(data):
+    try:
+        r = requests.post(BASE44_URL, headers=HEADERS, json=data, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"❌ Base44 create error: {e}")
+        return None
+
+def b44_list():
+    try:
+        r = requests.get(BASE44_URL, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"❌ Base44 list error: {e}")
+        return []
+
+def b44_update(record_id, data):
+    try:
+        r = requests.put(f"{BASE44_URL}/{record_id}", headers=HEADERS, json=data, timeout=15)
+        r.raise_for_status()
+        return r.json()
+    except Exception as e:
+        print(f"❌ Base44 update error: {e}")
+        return None
+
+# ── Twilio SMS ────────────────────────────────────────────────────────────────
+def send_sms(message):
+    try:
+        client = TwilioClient(TWILIO_SID, TWILIO_TOKEN)
+        msg = client.messages.create(
+            body=message,
+            from_=TWILIO_PHONE,
+            to=TWILIO_PHONE,
+        )
+        print(f"✅ SMS sent: {msg.sid}")
+        return True
+    except Exception as e:
+        print(f"❌ Twilio error: {e}")
+        return False
+
+# ── AGENT 1: Lead Capture ─────────────────────────────────────────────────────
 def agent_capture_leads():
-    print("\n\U0001f50d [AGENT 1] Lead Capture Starting...")
-from serpapi import GoogleSearch
-    
-    raw_leads = []
-    
-    search_queries = [
-        "auto repair shops Birmingham AL",
-        "hair salons Birmingham AL", 
-        "real estate agents Birmingham AL",
-        "insurance agents Birmingham AL",
-        "cleaning services Birmingham AL",
-    ]
-    
-    for query in search_queries:
-        params = {
-            "engine": "google_maps",
-            "q": query,
-            "api_key": SERPAPI_API_KEY,
-            "type": "search"
-        }
-        
-        search = GoogleSearch(params)
-        results = search.get_dict()
-        
-        for result in results.get("local_results", [])[:2]:
-            raw_leads.append({
-                "name": result.get("title", "Unknown"),
-                "phone": result.get("phone", "N/A"),
-                "email": f"info@{result.get('title','lead').lower().replace(' ','')}. com",
-                "address": result.get("address", "Birmingham, AL"),
-                "website": result.get("website", "N/A"),
-                "rating": result.get("rating", "N/A"),
-            })
+    print("\n" + "="*55)
+    print("🔍 AGENT 1: Lead Capture Starting...")
+    print("="*55)
+
     captured = []
-    for lead in raw_leads:
-        lead["status"]     = "New"
-        lead["created_at"] = datetime.now(UTC).isoformat()
-        captured.append(b44_create("Lead", lead))
-        print(f"\u2705 Captured Lead: {lead['name']}")
-        time.sleep(1)
-    print("\u2705 [AGENT 1] Lead Capture Complete.")
+
+    for city in CITIES:
+        for business_type in BUSINESS_TYPES:
+            query = f"{business_type} {city}"
+            print(f"\n  📍 Searching: {query}")
+            try:
+                search = GoogleSearch({
+                    "engine": "google_maps",
+                    "q": query,
+                    "api_key": SERPAPI_API_KEY,
+                    "type": "search",
+                })
+                results = search.get_dict()
+                local_results = results.get("local_results", [])[:LEADS_PER_QUERY]
+
+                for result in local_results:
+                    name = result.get("title", "Unknown")
+                    lead_data = {
+                        "name":          name,
+                        "phone":         result.get("phone", ""),
+                        "address":       result.get("address", ""),
+                        "website":       result.get("website", ""),
+                        "city":          city,
+                        "business_type": business_type,
+                        "rating":        result.get("rating", 0),
+                        "reviews":       result.get("reviews", 0),
+                        "status":        "New",
+                        "created_at":    datetime.now(UTC).isoformat(),
+                    }
+
+                    saved = b44_create(lead_data)
+                    if saved:
+                        captured.append(saved)
+                        print(f"    ✅ Captured: {name}")
+                    time.sleep(0.5)
+
+            except Exception as e:
+                print(f"    ❌ Search error for '{query}': {e}")
+
+    print(f"\n📊 Agent 1 Complete — Total Captured: {len(captured)}")
     return captured
 
-def agent_qualify_leads(leads_to_qualify):
-    print("\n\U0001f9d0 [AGENT 2] Lead Qualification Starting...")
+# ── AGENT 2: Lead Qualification ───────────────────────────────────────────────
+def agent_qualify_leads(leads):
+    print("\n" + "="*55)
+    print("🧠 AGENT 2: Lead Qualification Starting...")
+    print("="*55)
 
-    new_leads = []
-    for lead in leads_to_qualify:
-        current_status = lead.get("status")
-        current_business_type = lead.get("business_type")
-        current_city = lead.get("city")
+    qualified = []
 
-        # Filter for 'New' leads that have business_type and city fields, as required for qualification
-        if current_status == "New" and current_business_type and current_city:
-            new_leads.append(lead)
-        else:
-            print(f"[WARN] Lead {lead.get('name', 'N/A')} skipped for qualification due to missing 'New' status, business_type, or city.")
+    for lead in leads:
+        if not lead or lead.get("status") != "New":
+            continue
 
-    print(f"[DEBUG] Leads identified for qualification: {len(new_leads)}")
+        name          = lead.get("name", "Unknown")
+        phone         = lead.get("phone", "")
+        rating        = lead.get("rating", 0)
+        reviews       = lead.get("reviews", 0)
+        business_type = lead.get("business_type", "")
+        city          = lead.get("city", "")
 
-    qualified_leads = []
-    if not new_leads:
-        print("No new leads to qualify.")
-        return qualified_leads
+        system_prompt = """You are an expert B2B sales qualification AI for a marketing agency in Alabama.
+Qualify leads and respond ONLY with a valid JSON object, no extra text:
+{
+  "qualified": true or false,
+  "score": 1-10,
+  "priority": "high", "medium", or "low",
+  "reason": "one sentence reason",
+  "outreach_message": "personalized 2-sentence outreach SMS for this specific business"
+}
+Qualify if: rating >= 3.5 OR has phone number OR has 5+ reviews. Unqualify if no contact info at all."""
 
-    for lead in new_leads:
-        # These fields are guaranteed to exist due to the filtering above
-        business_type = lead['business_type']
-        city = lead['city']
+        user_prompt = f"""Qualify this Alabama business lead:
+Name: {name}
+Business Type: {business_type}
+City: {city}
+Phone: {phone}
+Rating: {rating}
+Reviews: {reviews}"""
 
-        prompt = f"""
-        You are a lead qualification agent for a marketing agency.
-        Your task is to qualify leads based on their business type and location.
-        A lead is \"qualified\" if it is an \"Auto Repair\" or \"Auto Detailing\" business located in \"Birmingham\".
-        Respond ONLY with \"qualified\" or \"unqualified\".
+        response = ask_groq(system_prompt, user_prompt, max_tokens=300)
 
-        Lead details:
-        Business Type: {business_type}
-        City: {city}
-        """
-        # Use ask_groq instead of ask_claude
-        response = ask_groq(
-            system="You are a helpful AI assistant. Always respond concisely.",
-            user=prompt,
-            max_tokens=10
-        )
-        print(f"[DEBUG_GROQ] Groq's final text response: {response}")
-        status = response.strip().lower()
-        print(f"[DEBUG_GROQ] Processed status from Groq: {status}")
+        if not response:
+            print(f"  ⚠️  Skipped (no AI response): {name}")
+            continue
 
-        if status == "qualified":
-            lead["status"] = "Qualified"
-            b44_update("Lead", lead["id"], {"status": "Qualified"})
-            qualified_leads.append(lead)
-            print(f"\u2b50 Qualified Lead: {lead['name']} ({business_type} in {city})")
-        else:
-            lead["status"] = "Unqualified"
-            b44_update("Lead", lead["id"], {"status": "Unqualified"})
-            print(f"\u274c Unqualified Lead: {lead['name']} ({business_type} in {city})")
-    print("\u2705 [AGENT 2] Lead Qualification Complete.")
-    return qualified_leads
-
-def agent_assign_leads(leads_to_assign):
-    print("\n\u2795 [AGENT 3] Lead Assignment Starting...")
-
-    qualified_leads = []
-    for lead in leads_to_assign:
-        current_status = lead.get("status")
-        current_business_type = lead.get("business_type")
-        current_city = lead.get("city")
-
-        # Filter for 'Qualified' leads that have business_type and city fields
-        if current_status == "Qualified" and current_business_type and current_city:
-             qualified_leads.append(lead)
-        else:
-            print(f"[WARN] Lead {lead.get('name', 'N/A')} skipped for assignment due to missing 'Qualified' status, business_type, or city.")
-
-    print(f"[DEBUG] Leads identified for assignment: {len(qualified_leads)}")
-
-    assigned_leads = []
-    if not qualified_leads:
-        print("No qualified leads to assign.")
-        return assigned_leads
-
-    sales_reps = [
-        {"id": "rep_1", "name": "Alice"},
-        {"id": "rep_2", "name": "Bob"}
-    ]
-    for i, lead in enumerate(qualified_leads):
-        rep = sales_reps[i % len(sales_reps)]
-        lead["assigned_to"] = rep["name"]
-        lead["status"] = "Assigned"
-        b44_update("Lead", lead["id"], {"assigned_to": rep["name"], "status": "Assigned"})
-        assigned_leads.append(lead)
-        print(f"\u2192 Assigned Lead: {lead['name']} to {rep['name']}")
-    print("\u2705 [AGENT 3] Lead Assignment Complete.")
-    return assigned_leads
-
-async def run_agents():
-    print("\U0001f680 Starting Leadflow Automation...")
-    if not GROQ_API_KEY:
-        print("GROQ_API_KEY environment variable is not set. Please set it before running.")
-        return
-    if not BASE44_API_KEY or not BASE44_APP_ID:
-        print("BASE44_API_KEY or BASE44_APP_ID environment variables are not set. Please set them before running.")
-        return
-
-    # Explicit Groq API key and model access test
-    if GROQ_API_KEY:
-        print("\nAttempting a simple Groq API test call to verify API key and model access...")
         try:
-            test_response = ask_groq(system="You are a helpful assistant.", user="Hello?")
-            print(f"\u2705 Groq API test successful. Response: {test_response}")
-        except Exception as e:
-            print(f"\u274c Groq API test failed with an unexpected error: {e}")
-            print("Please ensure your GROQ_API_KEY is correct and has access to the specified model (llama-3.1-8b-instant).")
-            return
+            clean = response.strip()
+            if "```" in clean:
+                clean = clean.split("```")[1].replace("json", "").strip()
+            result = json.loads(clean)
 
-    captured = agent_capture_leads()
-    time.sleep(2) # Give Base44 a moment to process the creations
+            if result.get("qualified"):
+                lead["status"]           = "Qualified"
+                lead["ai_score"]         = result.get("score", 0)
+                lead["priority"]         = result.get("priority", "medium")
+                lead["outreach_message"] = result.get("outreach_message", "")
+                b44_update(lead["id"], {
+                    "status":   "Qualified",
+                    "ai_score": result.get("score", 0),
+                    "priority": result.get("priority", "medium"),
+                })
+                qualified.append(lead)
+                print(f"  ⭐ Qualified [{result.get('priority','?').upper()}]: {name} (Score: {result.get('score')}/10)")
+            else:
+                b44_update(lead["id"], {"status": "Unqualified"})
+                print(f"  ❌ Unqualified: {name} — {result.get('reason','')}")
 
+        except (json.JSONDecodeError, Exception):
+            if phone or (rating and float(str(rating)) >= 3.5):
+                lead["status"]    = "Qualified"
+                lead["priority"]  = "medium"
+                b44_update(lead["id"], {"status": "Qualified"})
+                qualified.append(lead)
+                print(f"  ⭐ Qualified (fallback): {name}")
+            else:
+                b44_update(lead["id"], {"status": "Unqualified"})
+                print(f"  ❌ Unqualified (fallback): {name}")
+
+        time.sleep(0.3)
+
+    print(f"\n📊 Agent 2 Complete — Total Qualified: {len(qualified)}")
+    return qualified
+
+# ── AGENT 3: Lead Assignment ──────────────────────────────────────────────────
+def agent_assign_leads(leads):
+    print("\n" + "="*55)
+    print("📋 AGENT 3: Lead Assignment Starting...")
+    print("="*55)
+
+    assigned = []
+    priority_order = {"high": 0, "medium": 1, "low": 2}
+    leads_sorted = sorted(leads, key=lambda x: priority_order.get(x.get("priority", "low"), 2))
+
+    for i, lead in enumerate(leads_sorted):
+        if not lead or lead.get("status") != "Qualified":
+            continue
+
+        rep  = SALES_REPS[i % len(SALES_REPS)]
+        name = lead.get("name", "Unknown")
+
+        lead["assigned_to"] = rep["name"]
+        lead["status"]      = "Assigned"
+
+        b44_update(lead["id"], {
+            "assigned_to": rep["name"],
+            "status":      "Assigned",
+        })
+        assigned.append(lead)
+        print(f"  → Assigned: {name} [{lead.get('priority','?').upper()}] to {rep['name']}")
+
+        outreach = lead.get("outreach_message", "")
+        if outreach and TWILIO_SID and TWILIO_TOKEN:
+            send_sms(
+                f"LeadFlow AI | New Lead for {rep['name']}:\n"
+                f"{name}\n"
+                f"📞 {lead.get('phone','N/A')}\n"
+                f"📍 {lead.get('city','')}\n\n"
+                f"{outreach}"
+            )
+
+        time.sleep(0.3)
+
+    print(f"\n📊 Agent 3 Complete — Total Assigned: {len(assigned)}")
+    return assigned
+
+# ── MAIN RUNNER ───────────────────────────────────────────────────────────────
+def run_agents():
+    start_time = datetime.now()
+    print("\n" + "="*55)
+    print(f"🚀 LeadFlow AI v2.0 — {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*55)
+
+    if not check_credentials():
+        print("\n❌ Missing credentials — aborting.")
+        return
+
+    print("\n=== GROQ CONNECTION TEST ===")
+    test = ask_groq("You are a helpful assistant.", "Say OK.", max_tokens=5)
+    if test:
+        print(f"✅ Groq connected: {test}")
+    else:
+        print("❌ Groq connection failed — aborting.")
+        return
+
+    captured  = agent_capture_leads()
+    time.sleep(2)
     qualified = agent_qualify_leads(captured)
-    assigned = agent_assign_leads(qualified)
+    time.sleep(1)
+    assigned  = agent_assign_leads(qualified)
 
-    print("\n--- Leadflow Summary ---")
-    print(f"Total Captured Leads: {len(captured)}")
-    print(f"Total Qualified Leads: {len(qualified)}")
-    print(f"Total Assigned Leads: {len(assigned)}")
-    print("\U0001f3c1 Leadflow Automation Finished.")
+    duration = (datetime.now() - start_time).seconds
+    print("\n" + "="*55)
+    print("🏁 LeadFlow AI — Run Complete")
+    print("="*55)
+    print(f"⏱  Duration:   {duration} seconds")
+    print(f"📥 Captured:   {len(captured)} leads")
+    print(f"⭐ Qualified:  {len(qualified)} leads")
+    print(f"✅ Assigned:   {len(assigned)} leads")
+    print(f"📅 Finished:   {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print("="*55)
+
+    send_sms(
+        f"🚀 LeadFlow AI Daily Report\n"
+        f"📥 Captured: {len(captured)}\n"
+        f"⭐ Qualified: {len(qualified)}\n"
+        f"✅ Assigned: {len(assigned)}\n"
+        f"⏱ Duration: {duration}s\n"
+        f"📅 {datetime.now().strftime('%m/%d %I:%M %p')}"
+    )
 
 if __name__ == "__main__":
-    nest_asyncio.apply()
-    asyncio.run(run_agents())
+    run_agents()
