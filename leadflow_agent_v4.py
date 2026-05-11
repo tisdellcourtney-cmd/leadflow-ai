@@ -30,7 +30,7 @@ AUDIT FIXES APPLIED (v4.0 → v4.0-APEX-fixed):
       (empty set is valid). Logs clearly.
   3.  CRITICAL — Revenue pipeline parser in Agent 5 would silently produce 0
       for any estimate containing non-digit chars (e.g. "$1,200-1,800").
-      Fixed: robust regex-based int extraction.
+     
   4.  BUG — b44_update called with record_id="" for dry-run leads (id="dry_run_id")
       was passing the guard check and making real PUT requests.
       Fixed: guard checks `record_id not in ("", "dry_run_id")`.
