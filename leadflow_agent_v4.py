@@ -176,6 +176,7 @@ MAX_RETRIES         = 3
 RETRY_BACKOFF       = 2.0
 API_SLEEP           = 0.5    # SerpAPI throttle
 GROQ_SLEEP          = 0.3    # Groq throttle
+B44_WRITE_SLEEP     = 0.4    # Base44 write throttle (avoid 429s)
 WEBSITE_TIMEOUT     = 6
 HIGH_PRIORITY_SMS   = 25     # Max individual outreach SMS per run
 INTEL_TOP_N         = 10     # Leads fed to Agent 6 strategic brief
@@ -364,38 +365,54 @@ def b44_list_existing() -> set:
         return set()
 
 
+def _b44_request(method: str, url: str, data: dict) -> Optional[dict]:
+    """
+    Shared Base44 HTTP helper with 429-aware exponential back-off.
+    Adds B44_WRITE_SLEEP after every successful write to stay under rate limits.
+    """
+    for attempt in range(MAX_RETRIES):
+        try:
+            r = requests.request(method, url, headers=B44_HEADERS, json=data, timeout=15)
+            if r.status_code == 429:
+                wait = B44_WRITE_SLEEP * (3 ** attempt)   # 0.4 → 1.2 → 3.6 s
+                log.warning(
+                    "Base44 rate-limited (429) — waiting %.1fs (attempt %d/%d)",
+                    wait, attempt + 1, MAX_RETRIES,
+                )
+                time.sleep(wait)
+                continue
+            r.raise_for_status()
+            time.sleep(B44_WRITE_SLEEP)   # polite pause after every success
+            return r.json()
+        except requests.exceptions.HTTPError as exc:
+            log.error("Base44 HTTP error [%s %s]: %s", method, url, exc)
+            _record_error(f"B44 {method}: {exc}")
+            return None
+        except Exception as exc:
+            if attempt == MAX_RETRIES - 1:
+                log.error("Base44 error [%s %s]: %s", method, url, exc)
+                _record_error(f"B44 {method}: {exc}")
+                return None
+            wait = RETRY_BACKOFF * (2 ** attempt)
+            log.warning("Base44 transient error — retrying in %.1fs: %s", wait, exc)
+            time.sleep(wait)
+    log.error("Base44 %s failed after %d attempts (429 rate limit)", method, MAX_RETRIES)
+    _record_error(f"B44 {method}: max retries exceeded (429)")
+    return None
+
+
 def b44_create(data: dict) -> Optional[dict]:
     if DRY_RUN:
         log.info("    [DRY RUN] Skipping Base44 create")
         return {"_id": "dry_run_id"}
-    try:
-        r = retry(requests.post, BASE44_URL, headers=B44_HEADERS, json=data, timeout=15)
-        r.raise_for_status()
-        return r.json()
-    except Exception as exc:
-        log.error("Base44 create error: %s", exc)
-        _record_error(f"B44 create: {exc}")
-        return None
+    return _b44_request("POST", BASE44_URL, data)
 
 
 def b44_update(record_id: str, data: dict) -> Optional[dict]:
     """Skip the PUT for dry-run placeholders and actual dry-run mode."""
     if not record_id or record_id == "dry_run_id" or DRY_RUN:
         return {}
-    try:
-        r = retry(
-            requests.put,
-            f"{BASE44_URL}/{record_id}",
-            headers=B44_HEADERS,
-            json=data,
-            timeout=15,
-        )
-        r.raise_for_status()
-        return r.json()
-    except Exception as exc:
-        log.error("Base44 update error [%s]: %s", record_id, exc)
-        _record_error(f"B44 update: {exc}")
-        return None
+    return _b44_request("PUT", f"{BASE44_URL}/{record_id}", data)
 
 
 # ══════════════════════════════════════════════════════════════
