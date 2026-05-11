@@ -405,14 +405,41 @@ def b44_create(data: dict) -> Optional[dict]:
     if DRY_RUN:
         log.info("    [DRY RUN] Skipping Base44 create")
         return {"_id": "dry_run_id"}
-    return _b44_request("POST", BASE44_URL, data)
+    return _b44_request("POST", BASE44_URL, _sanitize_b44(data))
+
+
+def _sanitize_b44(data: dict) -> dict:
+    """
+    Scrub an update payload before sending to Base44.
+    - Drops None values (Base44 rejects explicit nulls on PUT).
+    - Converts lists → comma-separated strings.
+    - Converts booleans to lowercase strings Base44 accepts.
+    - Truncates strings longer than 2000 chars.
+    - Drops any key whose value cannot be serialised as a scalar.
+    """
+    clean = {}
+    for k, v in data.items():
+        if v is None:
+            continue
+        if isinstance(v, list):
+            v = ", ".join(str(i) for i in v)
+        if isinstance(v, bool):
+            v = str(v).lower()
+        if isinstance(v, (int, float)):
+            clean[k] = v
+            continue
+        if isinstance(v, str):
+            clean[k] = v[:2000]
+            continue
+        # Skip anything else (dicts, sets, etc.)
+    return clean
 
 
 def b44_update(record_id: str, data: dict) -> Optional[dict]:
     """Skip the PUT for dry-run placeholders and actual dry-run mode."""
     if not record_id or record_id == "dry_run_id" or DRY_RUN:
         return {}
-    return _b44_request("PUT", f"{BASE44_URL}/{record_id}", data)
+    return _b44_request("PUT", f"{BASE44_URL}/{record_id}", _sanitize_b44(data))
 
 
 # ══════════════════════════════════════════════════════════════
