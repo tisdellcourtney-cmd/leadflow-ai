@@ -38,7 +38,7 @@ jobs:
           TWILIO_TOKEN: ${{ secrets.TWILIO_TOKEN }}
           TWILIO_PHONE: ${{ secrets.TWILIO_PHONE }}
           ALERT_PHONE: ${{ secrets.ALERT_PHONE }}
-          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
-          CRM_WEBHOOK: ${{ secrets.CRM_WEBHOOK }}
+          
+          
           GROQ_MODEL_INPUT: ${{ secrets.GROQ_MODEL_INPUT }}
         run: python runner.py
