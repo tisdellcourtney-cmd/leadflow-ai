@@ -1,100 +1,31 @@
 """
-LeadFlow AI — v4.0 APEX  (audited & hardened)
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  The most aggressive, intelligent lead generation system ever built for     ║
-║  Alabama's local business market. Zero new APIs. Maximum extraction.         ║
-╠══════════════════════════════════════════════════════════════════════════════╣
-║  AGENT ARCHITECTURE                                                          ║
-║  ─────────────────                                                           ║
-║  Agent 1 — APEX Lead Capture     Multi-engine SerpAPI sweep (Maps + News    ║
-║                                  + organic text) across 8 cities × 20 niches║
-║  Agent 2 — Intelligence Recon    Website autopsy, social signal mining,      ║
-║                                  competitor gap analysis via SerpAPI organic ║
-║  Agent 3 — AI Brain Scoring      Groq multi-pass: score → persona → custom  ║
-║                                  outreach copy per lead (3 Groq calls/lead)  ║
-║  Agent 4 — Strategic Assignment  Skill-match reps by niche + load balancing ║
-║  Agent 5 — Omni Outreach         Rep SMS digest + per-lead AI outreach SMS  ║
-║                                  + Slack rich digest + CRM webhook push      ║
-║  Agent 6 — Intelligence Loop     Groq synthesizes run patterns, flags top   ║
-║                                  niches, generates next-run targeting advice ║
-║                                  sent to Slack as a strategic brief          ║
-╚══════════════════════════════════════════════════════════════════════════════╝
-
-AUDIT FIXES APPLIED (v4.0 → v4.0-APEX-fixed):
-  1.  CRITICAL — Agent 1 dedup counter bug: new-lead count in log message
-      re-queried existing_fps AFTER the set was mutated, always showing 0.
-      Fixed: count new leads before mutating the set.
-  2.  CRITICAL — b44_list_existing() silent failure: returned empty set on
-      any error, causing ALL existing leads to be re-captured every run.
-      Fixed: distinguishes network error (empty set + warning) vs empty CRM
-      (empty set is valid). Logs clearly.
-  3.  CRITICAL — Revenue pipeline parser in Agent 5 would silently produce 0
-      for any estimate containing non-digit chars (e.g. "$1,200-1,800").
-     
-  4.  BUG — b44_update called with record_id="" for dry-run leads (id="dry_run_id")
-      was passing the guard check and making real PUT requests.
-      Fixed: guard checks `record_id not in ("", "dry_run_id")`.
-  5.  BUG — _serpapi_organic() silently swallowed ALL exceptions without
-      logging to METRICS, making failures invisible.
-      Fixed: logs to METRICS["errors"] on exception.
-  6.  BUG — Agent 1 log line at end of each query loop computed the "new"
-      count by re-querying existing_fps post-mutation. Always showed 0.
-      Fixed: snapshot pre-mutation count and diff correctly.
-  7.  BUG — Groq client was instantiated inside ask_groq() on every call
-      (hundreds of times per run). Moved to module-level singleton.
-  8.  BUG — TwilioClient instantiated inside send_sms() on every call.
-      Moved to lazy module-level singleton.
-  9.  BUG — METRICS["errors"] is a list but was being appended to from
-      multiple threads (ThreadPoolExecutor) without a lock. Added threading.Lock.
- 10.  BUG — retry() used bare `Exception as exc` but re-raised with `raise`
-      (no arg), losing the original traceback chain. Fixed: `raise exc`.
- 11.  BUG — parse_json() split on "```" and then lstripped "json" as a
-      substring — would corrupt JSON starting with "j". Fixed: proper
-      strip of the fence language marker.
- 12.  BUG — Agent 5 individual SMS truncated to Twilio's 1600-char limit
-      inside send_sms, but the composed message was built without checking;
-      the voicemail script alone can exceed the limit, silently truncating
-      critical data. Fixed: messages split into chunks when > 1550 chars.
- 13.  BUG — CITY_FILTER comparison used `.lower() in c.lower()` which would
-      match "AL" against "Birmingham AL", "Huntsville AL", etc. — effectively
-      disabling the filter. Fixed: exact city match (normalized).
- 14.  RELIABILITY — _probe_website() did not set a User-Agent on failure path;
-      some servers return 403 for empty UA, causing false "dead website" flags.
-      Fixed: User-Agent set for all requests including redirects.
- 15.  RELIABILITY — Agent 3 heuristic fallback did not populate required fields
-      (outreach_sms, voicemail_script, etc.), causing KeyErrors downstream in
-      Agent 5 when building SMS for fallback-qualified leads.
-      Fixed: all required fields initialized to empty string in fallback path.
- 16.  RELIABILITY — Agent 6 intelligence loop was not guarded against
-      INTEL_TOP_N > len(assigned); sorted()[:INTEL_TOP_N] is safe, but the
-      log message claimed a fixed N even when fewer leads existed.
-      Fixed: log reflects actual count used.
- 17.  RELIABILITY — run_pipeline() did not catch exceptions from individual
-      agents; one agent crash aborted the entire run including outreach for
-      already-qualified leads. Fixed: per-agent try/except with graceful
-      continuation and error logging.
- 18.  RELIABILITY — metrics JSON was written before the final operator SMS,
-      so SMS count in the file was always 1 less than actual.
-      Fixed: metrics written after all outreach completes.
- 19.  STYLE/SAFETY — GROQ_MODEL env var fallback was set but never validated;
-      if an invalid model string was supplied, Groq returned a 400 error with
-      no clear message. Added model validation against known-good list.
- 20.  YAML — GitHub Actions cron "0 15 * * 1-5" fires at 15:00 UTC = 9 AM CST
-      (UTC-6) only in winter. In CDT (UTC-5, Mar–Nov) it fires at 10 AM.
-      Fixed cron to "0 14 * * 1-5" (8 AM UTC) with a comment explaining
-      Alabama's timezone offset, so it hits 9 AM CDT reliably.
+LeadFlow AI — v4.0 APEX
+════════════════════════════════════════════════════════════════
+Agent 1  APEX Lead Capture    Multi-engine SerpAPI sweep (Maps +
+                               organic) across 8 cities × 20 niches
+Agent 2  Intelligence Recon   Website probe, social signal mining,
+                               competitor gap analysis
+Agent 3  AI Brain Scoring     Groq multi-pass: score → persona →
+                               outreach copy (3 calls per lead)
+Agent 4  Strategic Assignment Skill-match reps by niche + load
+                               balancing
+Agent 5  Omni Outreach        Rep SMS digest + per-lead AI outreach
+                               SMS + Slack digest + CRM webhook
+Agent 6  Intelligence Loop    Groq synthesises run patterns, flags
+                               top niches, generates next-run advice
+════════════════════════════════════════════════════════════════
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import os
 import re
-import json
-import time
-import hashlib
-import logging
 import sys
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -103,9 +34,9 @@ from groq import Groq
 from serpapi import GoogleSearch
 from twilio.rest import Client as TwilioClient
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # LOGGING
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 logging.basicConfig(
     level=logging.INFO,
@@ -117,23 +48,21 @@ logging.basicConfig(
 )
 log = logging.getLogger("LeadFlow.v4")
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CREDENTIALS  (all from existing env vars — zero new keys)
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# CREDENTIALS
+# ══════════════════════════════════════════════════════════════
 
-GROQ_API_KEY     = os.getenv("GROQ_API_KEY",        "").strip()
-SERPAPI_API_KEY  = os.getenv("SERPAPI_API_KEY",      "").strip()
-BASE44_API_KEY   = os.getenv("BASE44_API_KEY",       "").strip()
-BASE44_APP_ID    = os.getenv("BASE44_APP_ID",        "").strip()
-TWILIO_SID       = os.getenv("TWILIO_ACCOUNT_SID",  "").strip()
-TWILIO_TOKEN     = os.getenv("TWILIO_AUTH_TOKEN",   "").strip()
-TWILIO_PHONE     = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
-ALERT_PHONE      = os.getenv("ALERT_PHONE_NUMBER",  "").strip()
-SLACK_WEBHOOK    = os.getenv("SLACK_WEBHOOK_URL",   "").strip()
-CRM_WEBHOOK      = os.getenv("CRM_WEBHOOK_URL",     "").strip()
-BASE44_ENTITY    = os.getenv("BASE44_ENTITY",       "Lead").strip()
+GROQ_API_KEY    = os.getenv("GROQ_API_KEY",        "").strip()
+SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY",      "").strip()
+BASE44_API_KEY  = os.getenv("BASE44_API_KEY",       "").strip()
+BASE44_APP_ID   = os.getenv("BASE44_APP_ID",        "").strip()
+TWILIO_SID      = os.getenv("TWILIO_ACCOUNT_SID",  "").strip()
+TWILIO_TOKEN    = os.getenv("TWILIO_AUTH_TOKEN",   "").strip()
+TWILIO_PHONE    = os.getenv("TWILIO_PHONE_NUMBER", "").strip()
+ALERT_PHONE     = os.getenv("ALERT_PHONE_NUMBER",  "").strip()
+BASE44_ENTITY   = "Lead"
 
-# FIX #19 — validate Groq model against known-good list; fall back gracefully
+# Validate Groq model; fall back to a known-good default if unrecognised.
 _GROQ_MODEL_INPUT = os.getenv("GROQ_MODEL", "").strip()
 _KNOWN_GROQ_MODELS = {
     "llama-3.3-70b-versatile",
@@ -144,7 +73,7 @@ _KNOWN_GROQ_MODELS = {
     "gemma2-9b-it",
 }
 if _GROQ_MODEL_INPUT and _GROQ_MODEL_INPUT not in _KNOWN_GROQ_MODELS:
-    log.warning(f"GROQ_MODEL '{_GROQ_MODEL_INPUT}' not in known list — using default.")
+    log.warning("GROQ_MODEL '%s' not in known list — using default.", _GROQ_MODEL_INPUT)
     GROQ_MODEL = "llama-3.3-70b-versatile"
 else:
     GROQ_MODEL = _GROQ_MODEL_INPUT or "llama-3.3-70b-versatile"
@@ -156,9 +85,9 @@ CITY_FILTER = os.getenv("CITY_FILTER", "").strip()
 BASE44_URL  = f"https://api.base44.app/api/apps/{BASE44_APP_ID}/entities/{BASE44_ENTITY}"
 B44_HEADERS = {"api_key": BASE44_API_KEY, "Content-Type": "application/json"}
 
-# ══════════════════════════════════════════════════════════════════════════════
-# COVERAGE — 8 cities × 20 business niches  (160 daily query combinations)
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# COVERAGE  — 8 cities × 20 niches = 160 daily query combos
+# ══════════════════════════════════════════════════════════════
 
 CITIES = [
     "Birmingham AL",
@@ -194,51 +123,69 @@ BUSINESS_TYPES = [
     "car dealerships",
 ]
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # REP CONFIGURATION
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 SALES_REPS = [
     {
         "id":          "rep_1",
         "name":        "Alice",
         "phone":       ALERT_PHONE,
-        "specialties": ["dental offices", "med spas and aesthetics", "physical therapy clinics", "chiropractors"],
+        "specialties": [
+            "dental offices",
+            "med spas and aesthetics",
+            "physical therapy clinics",
+            "chiropractors",
+        ],
     },
     {
         "id":          "rep_2",
         "name":        "Bob",
         "phone":       ALERT_PHONE,
-        "specialties": ["auto repair shops", "HVAC services", "plumbers", "roofing contractors", "electricians"],
+        "specialties": [
+            "auto repair shops",
+            "HVAC services",
+            "plumbers",
+            "roofing contractors",
+            "electricians",
+        ],
     },
     {
         "id":          "rep_3",
         "name":        "Carol",
         "phone":       ALERT_PHONE,
-        "specialties": ["real estate agents", "insurance agents", "law firms", "accounting firms", "mortgage brokers"],
+        "specialties": [
+            "real estate agents",
+            "insurance agents",
+            "law firms",
+            "accounting firms",
+            "mortgage brokers",
+        ],
     },
 ]
 
 rep_load: dict[str, int] = {r["id"]: 0 for r in SALES_REPS}
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # TUNING CONSTANTS
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
-LEADS_PER_QUERY     = 5     # Maps results per query
+LEADS_PER_QUERY     = 5
 MAX_RETRIES         = 3
 RETRY_BACKOFF       = 2.0
-API_SLEEP           = 0.4   # SerpAPI throttle
-GROQ_SLEEP          = 0.25  # Groq throttle
+API_SLEEP           = 0.5    # SerpAPI throttle
+GROQ_SLEEP          = 0.3    # Groq throttle
 WEBSITE_TIMEOUT     = 6
-QUALIFY_THRESHOLD   = 5     # Minimum AI score to qualify
-HIGH_PRIORITY_SMS   = 25    # Max individual outreach SMS per run
-INTEL_TOP_N         = 10    # Leads fed to Agent 6 strategic brief
-SMS_CHUNK_SIZE      = 1550  # FIX #12 — safe SMS chunk size (Twilio limit 1600)
+HIGH_PRIORITY_SMS   = 25     # Max individual outreach SMS per run
+INTEL_TOP_N         = 10     # Leads fed to Agent 6 strategic brief
+SMS_CHUNK_SIZE      = 1550   # Safe chunk size (Twilio hard limit 1600)
+# GitHub Actions jobs time out at 30 min; leave 5 min for outreach agents.
+MAX_RUNTIME_SECONDS = 1500
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # RUN METRICS
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 METRICS: dict = {
     "run_date":         "",
@@ -258,16 +205,19 @@ METRICS: dict = {
     "top_cities":       {},
 }
 
-# FIX #9 — thread-safe error list mutations
+# Lock guards list appends from multiple threads (ThreadPoolExecutor).
 _metrics_lock = threading.Lock()
+
 
 def _record_error(msg: str) -> None:
     with _metrics_lock:
         METRICS["errors"].append(msg)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MODULE-LEVEL SERVICE SINGLETONS  (FIX #7, #8)
-# ══════════════════════════════════════════════════════════════════════════════
+
+# ══════════════════════════════════════════════════════════════
+# MODULE-LEVEL SERVICE SINGLETONS
+# Instantiated once at first use, not per-call.
+# ══════════════════════════════════════════════════════════════
 
 _groq_client: Optional[Groq] = None
 _twilio_client: Optional[TwilioClient] = None
@@ -287,25 +237,25 @@ def _get_twilio() -> TwilioClient:
     return _twilio_client
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # UTILITY FUNCTIONS
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 def lead_fingerprint(name: str, address: str) -> str:
     raw = f"{name.strip().lower()}|{address.strip().lower()}"
     return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
 
-def retry(fn, *args, retries=MAX_RETRIES, **kwargs):
-    """FIX #10 — preserve traceback on re-raise."""
+def retry(fn, *args, retries: int = MAX_RETRIES, **kwargs):
+    """Retry with exponential back-off; preserves the original traceback."""
     for attempt in range(retries):
         try:
             return fn(*args, **kwargs)
         except Exception as exc:
             if attempt == retries - 1:
-                raise exc  # re-raise the caught exception, not a bare raise
+                raise exc
             wait = RETRY_BACKOFF * (2 ** attempt)
-            log.warning(f"Retry {attempt+1}/{retries} — {exc} — waiting {wait:.1f}s")
+            log.warning("Retry %d/%d — %s — waiting %.1fs", attempt + 1, retries, exc, wait)
             time.sleep(wait)
 
 
@@ -321,25 +271,31 @@ def check_credentials() -> bool:
         "TWILIO_PHONE_NUMBER": TWILIO_PHONE,
         "ALERT_PHONE_NUMBER":  ALERT_PHONE,
     }
+    log.info("  NOTE: Slack and CRM webhook disabled for this run")
     ok = True
     for k, v in required.items():
         if not v:
-            log.error(f"  MISSING: {k}")
+            log.error("  MISSING: %s", k)
             ok = False
         else:
-            log.info(f"  OK:      {k} = {v[:6]}…")
+            log.info("  OK:      %s = %s…", k, v[:6])
     if DRY_RUN:
         log.info("  MODE: DRY RUN — all writes suppressed")
     if CITY_FILTER:
-        log.info(f"  FILTER: City restricted to '{CITY_FILTER}'")
+        log.info("  FILTER: City restricted to '%s'", CITY_FILTER)
     return ok
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # GROQ AI LAYER
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
-def ask_groq(system: str, user: str, max_tokens: int = 900, temperature: float = 0.3) -> Optional[str]:
+def ask_groq(
+    system: str,
+    user: str,
+    max_tokens: int = 900,
+    temperature: float = 0.3,
+) -> Optional[str]:
     try:
         res = _get_groq().chat.completions.create(
             messages=[
@@ -352,22 +308,23 @@ def ask_groq(system: str, user: str, max_tokens: int = 900, temperature: float =
         )
         return res.choices[0].message.content.strip()
     except Exception as exc:
-        log.error(f"Groq error: {exc}")
+        log.error("Groq error: %s", exc)
         _record_error(f"Groq: {exc}")
         return None
 
 
 def parse_json(raw: Optional[str]) -> Optional[dict]:
-    """FIX #11 — properly strip markdown fences without corrupting content."""
+    """
+    Safely parse a JSON string that may be wrapped in markdown fences.
+    Strips ```json … ``` or ``` … ``` without corrupting JSON content.
+    """
     if not raw:
         return None
     clean = raw.strip()
-    # Strip ```json ... ``` or ``` ... ``` fences
     if "```" in clean:
-        # Extract content between first and last fence
         parts = clean.split("```")
         for part in parts:
-            # Strip optional language marker on first line only
+            # Strip an optional language marker (e.g. "json\n") on the first line only.
             candidate = re.sub(r"^[a-z]+\n", "", part.strip(), count=1)
             if candidate.startswith("{"):
                 clean = candidate
@@ -378,15 +335,16 @@ def parse_json(raw: Optional[str]) -> Optional[dict]:
         return None
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # BASE44 CRM LAYER
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 def b44_list_existing() -> set:
     """
-    FIX #2 — distinguish network/API errors from a genuinely empty CRM.
-    On error: log warning and return empty set (safe: worst case = re-capture
-    leads that will fail the create with a duplicate-key error, not data loss).
+    Fetch all existing lead fingerprints for deduplication.
+    Distinguishes a network error (warn + return empty) from a genuinely
+    empty CRM (also returns empty — both are safe; worst case is a duplicate
+    key error on create, not data loss).
     """
     if not BASE44_API_KEY or not BASE44_APP_ID:
         log.warning("Base44 credentials missing — skipping dedup prefetch")
@@ -396,13 +354,13 @@ def b44_list_existing() -> set:
         r.raise_for_status()
         data = r.json()
         fps = {rec.get("fingerprint", "") for rec in data if rec.get("fingerprint")}
-        log.info(f"  Dedup prefetch: {len(data)} records, {len(fps)} fingerprints loaded")
+        log.info("  Dedup prefetch: %d records, %d fingerprints loaded", len(data), len(fps))
         return fps
     except requests.exceptions.RequestException as exc:
-        log.warning(f"Dedup prefetch network error: {exc} — proceeding without dedup")
+        log.warning("Dedup prefetch network error: %s — proceeding without dedup", exc)
         return set()
     except Exception as exc:
-        log.warning(f"Dedup prefetch unexpected error: {exc} — proceeding without dedup")
+        log.warning("Dedup prefetch unexpected error: %s — proceeding without dedup", exc)
         return set()
 
 
@@ -415,60 +373,66 @@ def b44_create(data: dict) -> Optional[dict]:
         r.raise_for_status()
         return r.json()
     except Exception as exc:
-        log.error(f"Base44 create error: {exc}")
+        log.error("Base44 create error: %s", exc)
         _record_error(f"B44 create: {exc}")
         return None
 
 
 def b44_update(record_id: str, data: dict) -> Optional[dict]:
-    """FIX #4 — guard against both "" and "dry_run_id"."""
+    """Skip the PUT for dry-run placeholders and actual dry-run mode."""
     if not record_id or record_id == "dry_run_id" or DRY_RUN:
         return {}
     try:
-        r = retry(requests.put, f"{BASE44_URL}/{record_id}", headers=B44_HEADERS, json=data, timeout=15)
+        r = retry(
+            requests.put,
+            f"{BASE44_URL}/{record_id}",
+            headers=B44_HEADERS,
+            json=data,
+            timeout=15,
+        )
         r.raise_for_status()
         return r.json()
     except Exception as exc:
-        log.error(f"Base44 update error [{record_id}]: {exc}")
+        log.error("Base44 update error [%s]: %s", record_id, exc)
         _record_error(f"B44 update: {exc}")
         return None
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # TWILIO SMS LAYER
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 def _send_sms_chunk(to: str, body: str) -> bool:
-    """Send a single SMS chunk (caller must ensure len <= SMS_CHUNK_SIZE)."""
+    """Send a single pre-sized chunk. Caller ensures len(body) <= SMS_CHUNK_SIZE."""
     try:
         msg = _get_twilio().messages.create(body=body, from_=TWILIO_PHONE, to=to)
-        log.info(f"  SMS sent → {to} [{msg.sid}]")
+        log.info("  SMS sent → %s [%s]", to, msg.sid)
         with _metrics_lock:
             METRICS["sms_sent"] += 1
         return True
     except Exception as exc:
-        log.error(f"Twilio error: {exc}")
+        log.error("Twilio error: %s", exc)
         _record_error(f"Twilio: {exc}")
         return False
 
 
 def send_sms(to: str, body: str) -> bool:
     """
-    FIX #12 — split long messages into chunks so Twilio's 1600-char hard limit
-    never silently truncates critical outreach content.
+    Send an SMS, splitting into ≤ SMS_CHUNK_SIZE chunks at newline boundaries
+    so Twilio's 1600-char hard limit never silently truncates content.
     """
     if DRY_RUN:
-        log.info(f"  [DRY RUN] SMS → {to}: {body[:80]}…")
+        log.info("  [DRY RUN] SMS → %s: %s…", to, body[:80])
         return True
     if not all([TWILIO_SID, TWILIO_TOKEN, TWILIO_PHONE, to]):
-        log.warning("SMS skipped — missing Twilio config")
+        log.warning("SMS skipped — missing Twilio config or recipient number")
         return False
 
     if len(body) <= SMS_CHUNK_SIZE:
         return _send_sms_chunk(to, body)
 
-    # Split into chunks at newline boundaries where possible
-    chunks = []
+    # Split at newline boundaries where possible to preserve readability.
+    chunks: list[str] = []
     remaining = body
     while len(remaining) > SMS_CHUNK_SIZE:
         split_at = remaining.rfind("\n", 0, SMS_CHUNK_SIZE)
@@ -483,55 +447,28 @@ def send_sms(to: str, body: str) -> bool:
     for i, chunk in enumerate(chunks, 1):
         if len(chunks) > 1:
             chunk = f"[{i}/{len(chunks)}] {chunk}"
-        ok = _send_sms_chunk(to, chunk)
-        if not ok:
+        if not _send_sms_chunk(to, chunk):
             success = False
         time.sleep(0.3)
     return success
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SLACK LAYER
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# SLACK / CRM STUBS  (disabled — no webhooks configured)
+# ══════════════════════════════════════════════════════════════
 
 def send_slack(payload: dict) -> bool:
-    if DRY_RUN:
-        log.info("  [DRY RUN] Slack payload suppressed")
-        return True
-    if not SLACK_WEBHOOK:
-        return False
-    try:
-        r = requests.post(SLACK_WEBHOOK, json=payload, timeout=10)
-        r.raise_for_status()
-        return True
-    except Exception as exc:
-        log.error(f"Slack error: {exc}")
-        _record_error(f"Slack: {exc}")
-        return False
+    log.info("  [Slack disabled] Skipping Slack notification")
+    return False
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CRM WEBHOOK LAYER
-# ══════════════════════════════════════════════════════════════════════════════
 
 def push_crm(lead: dict) -> bool:
-    if DRY_RUN or not CRM_WEBHOOK:
-        return False
-    try:
-        r = requests.post(CRM_WEBHOOK, json=lead, timeout=10)
-        r.raise_for_status()
-        with _metrics_lock:
-            METRICS["crm_pushed"] += 1
-        return True
-    except Exception as exc:
-        log.error(f"CRM webhook error: {exc}")
-        _record_error(f"CRM: {exc}")
-        return False
+    return False
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # AGENT 1 — APEX LEAD CAPTURE
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 def _serpapi_maps(query: str) -> list[dict]:
     try:
@@ -541,9 +478,8 @@ def _serpapi_maps(query: str) -> list[dict]:
             "api_key": SERPAPI_API_KEY,
             "type":    "search",
         }).get_dict()
-        items = results.get("local_results", [])[:LEADS_PER_QUERY]
         leads = []
-        for item in items:
+        for item in results.get("local_results", [])[:LEADS_PER_QUERY]:
             leads.append({
                 "name":      item.get("title", "Unknown"),
                 "phone":     item.get("phone", ""),
@@ -558,13 +494,16 @@ def _serpapi_maps(query: str) -> list[dict]:
             })
         return leads
     except Exception as exc:
-        log.warning(f"Maps search failed for '{query}': {exc}")
+        log.warning("Maps search failed for '%s': %s", query, exc)
         _record_error(f"Maps '{query}': {exc}")
         return []
 
 
+# Aggregator domains to exclude from organic results.
+_ORGANIC_SKIP = ("yelp.com", "yellowpages", "bbb.org", "manta.com")
+
+
 def _serpapi_organic(query: str) -> list[dict]:
-    """FIX #5 — log errors to METRICS so failures are visible."""
     try:
         results = GoogleSearch({
             "engine":  "google",
@@ -574,10 +513,8 @@ def _serpapi_organic(query: str) -> list[dict]:
         }).get_dict()
         leads = []
         for item in results.get("organic_results", []):
-            link    = item.get("link", "")
-            snippet = item.get("snippet", "")
-            # Only harvest local business listings; skip aggregator directories
-            if not link or any(d in link for d in ("yelp.com", "yellowpages", "bbb.org", "manta.com")):
+            link = item.get("link", "")
+            if not link or any(d in link for d in _ORGANIC_SKIP):
                 continue
             leads.append({
                 "name":      item.get("title", ""),
@@ -589,27 +526,29 @@ def _serpapi_organic(query: str) -> list[dict]:
                 "place_id":  "",
                 "thumbnail": "",
                 "hours":     "",
-                "snippet":   snippet,
+                "snippet":   item.get("snippet", ""),
                 "source":    "google_organic",
             })
         return leads
     except Exception as exc:
-        log.warning(f"Organic search failed for '{query}': {exc}")
-        _record_error(f"Organic '{query}': {exc}")  # FIX #5
+        log.warning("Organic search failed for '%s': %s", query, exc)
+        _record_error(f"Organic '{query}': {exc}")
         return []
 
 
 def agent_capture_leads(existing_fps: set) -> list[dict]:
-    log.info("\n" + "═" * 62)
+    log.info("\n" + "=" * 62)
     log.info("AGENT 1 — APEX LEAD CAPTURE (Maps + Organic)")
-    log.info("═" * 62)
+    log.info("=" * 62)
 
-    # FIX #13 — exact city match (normalized lowercase), not substring
+    # Exact city match (normalised lowercase) to avoid substring false-positives.
     if CITY_FILTER:
         city_filter_norm = CITY_FILTER.strip().lower()
         cities = [c for c in CITIES if c.lower() == city_filter_norm]
         if not cities:
-            log.warning(f"CITY_FILTER '{CITY_FILTER}' matched no cities — running all cities")
+            log.warning(
+                "CITY_FILTER '%s' matched no cities — running all cities", CITY_FILTER
+            )
             cities = CITIES
     else:
         cities = CITIES
@@ -618,25 +557,32 @@ def agent_capture_leads(existing_fps: set) -> list[dict]:
     METRICS["niches_queried"] = len(BUSINESS_TYPES)
 
     captured: list[dict] = []
-    dupes    = 0
+    dupes         = 0
     total_queries = 0
+    agent1_start  = time.time()
 
     for city in cities:
         for btype in BUSINESS_TYPES:
+            # Check timeout at the top of each query iteration so we can exit
+            # cleanly and still hand off to the outreach agents.
+            if time.time() - agent1_start > MAX_RUNTIME_SECONDS:
+                log.warning(
+                    "  MAX RUNTIME reached — stopping Agent 1 early "
+                    "to allow outreach to run"
+                )
+                break
+
             query = f"{btype} {city}"
-            log.info(f"  → {query}")
+            log.info("  → %s", query)
             total_queries += 1
 
-            maps_leads    = _serpapi_maps(query)
+            maps_leads = _serpapi_maps(query)
             time.sleep(API_SLEEP)
             organic_leads = _serpapi_organic(query)
             time.sleep(API_SLEEP)
 
-            all_raw = maps_leads + organic_leads
-
-            # FIX #1 & #6 — compute new-lead count BEFORE mutating existing_fps
             new_this_query = 0
-            for raw in all_raw:
+            for raw in maps_leads + organic_leads:
                 name    = raw.get("name", "Unknown Business")
                 address = raw.get("address", raw.get("website", ""))
                 fp      = lead_fingerprint(name, address)
@@ -658,43 +604,55 @@ def agent_capture_leads(existing_fps: set) -> list[dict]:
                 saved = b44_create(lead)
                 if saved:
                     lead["id"] = saved.get("_id") or saved.get("id", "")
+                    # Mutate the set AFTER capturing the new-count increment.
+                    existing_fps.add(fp)
                     captured.append(lead)
-                    existing_fps.add(fp)   # mutate AFTER capture
                     new_this_query += 1
-
                     METRICS["top_niches"][btype] = METRICS["top_niches"].get(btype, 0) + 1
                     METRICS["top_cities"][city]  = METRICS["top_cities"].get(city,  0) + 1
 
             log.info(
-                f"     Maps: {len(maps_leads)} | Organic: {len(organic_leads)} | "
-                f"New this query: {new_this_query}"  # FIX #6 — correct count
+                "     Maps: %d | Organic: %d | New this query: %d",
+                len(maps_leads), len(organic_leads), new_this_query,
             )
+        else:
+            # Inner loop completed without a break — continue outer loop.
+            continue
+        # Inner loop broke early (timeout) — break outer loop too.
+        break
 
     METRICS["total_queries"] = total_queries
     METRICS["captured"]      = len(captured)
     METRICS["dupes_skipped"] = dupes
 
-    log.info(f"\nAgent 1 Complete — Captured: {len(captured)} | Dupes skipped: {dupes}")
+    log.info("\nAgent 1 Complete — Captured: %d | Dupes skipped: %d", len(captured), dupes)
     return captured
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # AGENT 2 — INTELLIGENCE RECON
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 _PROBE_HEADERS = {"User-Agent": "Mozilla/5.0 LeadFlow-Probe/4.0"}
 
 
 def _probe_website(url: str) -> dict:
-    """FIX #14 — User-Agent applied consistently; handles all failure modes."""
+    """
+    Probe a website for liveness, SSL, speed, and redirect behaviour.
+    User-Agent is set on all requests to avoid 403s from UA-sensitive servers.
+    """
+    null_result = {"live": False, "has_ssl": False, "slow": False, "redirect": False, "status": 0}
     if not url:
-        return {"live": False, "has_ssl": False, "slow": False, "redirect": False, "status": 0}
+        return null_result
     if not url.startswith("http"):
         url = "https://" + url
     try:
         start = time.time()
         r = requests.get(
-            url, timeout=WEBSITE_TIMEOUT, allow_redirects=True, headers=_PROBE_HEADERS
+            url,
+            timeout=WEBSITE_TIMEOUT,
+            allow_redirects=True,
+            headers=_PROBE_HEADERS,
         )
         latency = time.time() - start
         return {
@@ -705,7 +663,7 @@ def _probe_website(url: str) -> dict:
             "status":   r.status_code,
         }
     except Exception:
-        return {"live": False, "has_ssl": False, "slow": True, "redirect": False, "status": 0}
+        return {**null_result, "slow": True}
 
 
 def _social_signals(name: str, city: str) -> dict:
@@ -720,8 +678,8 @@ def _social_signals(name: str, city: str) -> dict:
             "api_key": SERPAPI_API_KEY,
             "num":     5,
         }).get_dict()
-        for r in results.get("organic_results", []):
-            link = r.get("link", "").lower()
+        for item in results.get("organic_results", []):
+            link = item.get("link", "").lower()
             if "facebook.com"  in link: signals["facebook"]  = True
             if "instagram.com" in link: signals["instagram"] = True
             if "yelp.com"      in link: signals["yelp"]      = True
@@ -732,12 +690,11 @@ def _social_signals(name: str, city: str) -> dict:
 
 def _competitor_intel(name: str, btype: str, city: str) -> dict:
     bname_slug = name.lower().replace(" ", "").replace("'", "")
-    query      = f"{btype} {city}"
     intel      = {"top_competitor": "", "lead_owns_top_result": False}
     try:
         results = GoogleSearch({
             "engine":  "google",
-            "q":       query,
+            "q":       f"{btype} {city}",
             "api_key": SERPAPI_API_KEY,
             "num":     3,
         }).get_dict()
@@ -753,9 +710,9 @@ def _competitor_intel(name: str, btype: str, city: str) -> dict:
 
 
 def agent_enrich_leads(leads: list[dict]) -> list[dict]:
-    log.info("\n" + "═" * 62)
+    log.info("\n" + "=" * 62)
     log.info("AGENT 2 — INTELLIGENCE RECON")
-    log.info("═" * 62)
+    log.info("=" * 62)
 
     for lead in leads:
         name    = lead.get("name", "?")
@@ -763,7 +720,7 @@ def agent_enrich_leads(leads: list[dict]) -> list[dict]:
         city    = lead.get("city", "")
         btype   = lead.get("business_type", "")
 
-        log.info(f"  Recon: {name}")
+        log.info("  Recon: %s", name)
 
         site = _probe_website(website)
         lead["website_live"]    = site["live"]
@@ -783,16 +740,25 @@ def agent_enrich_leads(leads: list[dict]) -> list[dict]:
         lead["top_competitor"]     = comp["top_competitor"]
         lead["owns_search_result"] = comp["lead_owns_top_result"]
 
-        pain_points = []
-        if lead["no_website"]:                    pain_points.append("no website")
-        elif not lead["website_live"]:            pain_points.append("dead website")
-        if not lead["website_has_ssl"]:           pain_points.append("no SSL certificate")
-        if lead["website_slow"]:                  pain_points.append("slow-loading website")
-        if not lead["owns_search_result"]:        pain_points.append("competitor outranks them")
-        if (lead.get("reviews") or 0) < 10:       pain_points.append("few online reviews")
-        if not socials["facebook"]:               pain_points.append("no Facebook presence")
-        if not socials["instagram"]:              pain_points.append("no Instagram presence")
-        if not socials["yelp"]:                   pain_points.append("not on Yelp")
+        pain_points: list[str] = []
+        if lead["no_website"]:
+            pain_points.append("no website")
+        elif not lead["website_live"]:
+            pain_points.append("dead website")
+        if not lead["website_has_ssl"]:
+            pain_points.append("no SSL certificate")
+        if lead["website_slow"]:
+            pain_points.append("slow-loading website")
+        if not lead["owns_search_result"]:
+            pain_points.append("competitor outranks them")
+        if (lead.get("reviews") or 0) < 10:
+            pain_points.append("few online reviews")
+        if not socials["facebook"]:
+            pain_points.append("no Facebook presence")
+        if not socials["instagram"]:
+            pain_points.append("no Instagram presence")
+        if not socials["yelp"]:
+            pain_points.append("not on Yelp")
 
         lead["pain_points"]      = pain_points
         lead["pain_point_count"] = len(pain_points)
@@ -813,13 +779,13 @@ def agent_enrich_leads(leads: list[dict]) -> list[dict]:
         })
 
     METRICS["enriched"] = len(leads)
-    log.info(f"\nAgent 2 Complete — Enriched: {len(leads)} leads")
+    log.info("\nAgent 2 Complete — Enriched: %d leads", len(leads))
     return leads
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # AGENT 3 — AI BRAIN: MULTI-PASS GROQ SCORING
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 SCORE_SYSTEM = """\
 You are the head of sales strategy at Alabama's most aggressive digital marketing agency.
@@ -877,8 +843,9 @@ Respond ONLY with valid JSON — no preamble, no markdown:
 }\
 """
 
-# FIX #15 — default fields to prevent KeyError downstream in Agent 5
-_LEAD_COPY_DEFAULTS = {
+# Default values ensure all required keys exist even when Groq fails,
+# preventing KeyErrors in downstream agents.
+_LEAD_COPY_DEFAULTS: dict = {
     "status":                  "",
     "ai_score":                5,
     "priority":                "medium",
@@ -901,81 +868,85 @@ _LEAD_COPY_DEFAULTS = {
 
 def _score_lead(lead: dict) -> Optional[dict]:
     pains  = ", ".join(lead.get("pain_points", [])) or "none detected"
-    prompt = f"""
-Name:                {lead.get('name', 'Unknown')}
-Business Type:       {lead.get('business_type', '')}
-City:                {lead.get('city', '')}
-Phone:               {lead.get('phone', 'MISSING')}
-Rating:              {lead.get('rating', 0)} stars / {lead.get('reviews', 0)} reviews
-Website Live:        {lead.get('website_live', False)}
-Has SSL:             {lead.get('website_has_ssl', False)}
-Website Slow:        {lead.get('website_slow', False)}
-No Website:          {lead.get('no_website', False)}
-Has Facebook:        {lead.get('has_facebook', False)}
-Has Instagram:       {lead.get('has_instagram', False)}
-Has Yelp:            {lead.get('has_yelp', False)}
-Social Count:        {lead.get('social_presence_count', 0)} platforms
-Top Competitor:      {lead.get('top_competitor', 'Unknown')}
-Owns Search Result:  {lead.get('owns_search_result', False)}
-Pain Points ({lead.get('pain_point_count', 0)}): {pains}
-"""
+    prompt = (
+        f"Name:                {lead.get('name', 'Unknown')}\n"
+        f"Business Type:       {lead.get('business_type', '')}\n"
+        f"City:                {lead.get('city', '')}\n"
+        f"Phone:               {lead.get('phone', 'MISSING')}\n"
+        f"Rating:              {lead.get('rating', 0)} stars / {lead.get('reviews', 0)} reviews\n"
+        f"Website Live:        {lead.get('website_live', False)}\n"
+        f"Has SSL:             {lead.get('website_has_ssl', False)}\n"
+        f"Website Slow:        {lead.get('website_slow', False)}\n"
+        f"No Website:          {lead.get('no_website', False)}\n"
+        f"Has Facebook:        {lead.get('has_facebook', False)}\n"
+        f"Has Instagram:       {lead.get('has_instagram', False)}\n"
+        f"Has Yelp:            {lead.get('has_yelp', False)}\n"
+        f"Social Count:        {lead.get('social_presence_count', 0)} platforms\n"
+        f"Top Competitor:      {lead.get('top_competitor', 'Unknown')}\n"
+        f"Owns Search Result:  {lead.get('owns_search_result', False)}\n"
+        f"Pain Points ({lead.get('pain_point_count', 0)}): {pains}\n"
+    )
     return parse_json(ask_groq(SCORE_SYSTEM, prompt, max_tokens=400))
 
 
 def _persona_lead(lead: dict) -> Optional[dict]:
-    prompt = f"""
-Business: {lead.get('name')} | Type: {lead.get('business_type')} | City: {lead.get('city')}
-Rating: {lead.get('rating', 0)} stars, {lead.get('reviews', 0)} reviews
-Digital gaps: {', '.join(lead.get('pain_points', [])) or 'minimal'}
-"""
+    prompt = (
+        f"Business: {lead.get('name')} | Type: {lead.get('business_type')} | City: {lead.get('city')}\n"
+        f"Rating: {lead.get('rating', 0)} stars, {lead.get('reviews', 0)} reviews\n"
+        f"Digital gaps: {', '.join(lead.get('pain_points', [])) or 'minimal'}\n"
+    )
     return parse_json(ask_groq(PERSONA_SYSTEM, prompt, max_tokens=300))
 
 
 def _copy_lead(lead: dict, score_data: dict, persona_data: dict) -> Optional[dict]:
-    prompt = f"""
-Business: {lead.get('name')} | {lead.get('business_type')} | {lead.get('city')}
-Score: {score_data.get('score', 5)}/10 | Priority: {score_data.get('priority', 'medium')}
-Pain: {score_data.get('pain_summary', '')}
-Decision-maker: {persona_data.get('decision_maker_title', 'Owner')}
-Best hook: {persona_data.get('best_hook', '')}
-Service rec: {score_data.get('service_recommendation', '')}
-"""
+    prompt = (
+        f"Business: {lead.get('name')} | {lead.get('business_type')} | {lead.get('city')}\n"
+        f"Score: {score_data.get('score', 5)}/10 | Priority: {score_data.get('priority', 'medium')}\n"
+        f"Pain: {score_data.get('pain_summary', '')}\n"
+        f"Decision-maker: {persona_data.get('decision_maker_title', 'Owner')}\n"
+        f"Best hook: {persona_data.get('best_hook', '')}\n"
+        f"Service rec: {score_data.get('service_recommendation', '')}\n"
+    )
     return parse_json(ask_groq(COPY_SYSTEM, prompt, max_tokens=500))
 
 
 def agent_qualify_leads(leads: list[dict]) -> list[dict]:
-    log.info("\n" + "═" * 62)
+    log.info("\n" + "=" * 62)
     log.info("AGENT 3 — AI BRAIN: MULTI-PASS SCORING")
-    log.info("═" * 62)
+    log.info("=" * 62)
 
     qualified: list[dict] = []
 
     for lead in leads:
         name = lead.get("name", "?")
-        log.info(f"  Scoring: {name}")
+        log.info("  Scoring: %s", name)
 
         # ── Pass 1: Score ──
         score_data = _score_lead(lead)
         time.sleep(GROQ_SLEEP)
 
         if not score_data:
-            # FIX #15 — initialize ALL required fields before appending
+            # Groq failed — apply heuristic fallback.
+            # Initialise ALL required fields to prevent KeyErrors downstream.
             has_phone  = bool(lead.get("phone"))
             pain_count = lead.get("pain_point_count", 0)
             lead.update({**_LEAD_COPY_DEFAULTS, "status": "Qualified", "priority": "medium", "ai_score": 5})
             if has_phone or pain_count >= 3:
                 b44_update(lead.get("id", ""), {"status": "Qualified", "ai_score": 5})
                 qualified.append(lead)
-                log.info(f"  Qualified (heuristic fallback): {name}")
+                log.info("  Qualified (heuristic fallback): %s", name)
             else:
                 lead["status"] = "Unqualified"
                 b44_update(lead.get("id", ""), {"status": "Unqualified"})
-                log.info(f"  Unqualified (fallback): {name}")
+                log.info("  Unqualified (fallback): %s", name)
             continue
 
         if not score_data.get("qualified"):
             b44_update(lead.get("id", ""), {"status": "Unqualified"})
-            log.info(f"  Unqualified [{score_data.get('score', 0)}/10]: {name} — {score_data.get('reason', '')}")
+            log.info(
+                "  Unqualified [%s/10]: %s — %s",
+                score_data.get("score", 0), name, score_data.get("reason", ""),
+            )
             continue
 
         # ── Pass 2: Persona ──
@@ -990,7 +961,7 @@ def agent_qualify_leads(leads: list[dict]) -> list[dict]:
         priority = score_data.get("priority", "medium")
 
         lead.update({
-            **_LEAD_COPY_DEFAULTS,  # initialize defaults first
+            **_LEAD_COPY_DEFAULTS,
             "status":                  "Qualified",
             "ai_score":                score,
             "priority":                priority,
@@ -1030,20 +1001,21 @@ def agent_qualify_leads(leads: list[dict]) -> list[dict]:
 
         qualified.append(lead)
         log.info(
-            f"  Qualified [{priority.upper()} | {score}/10 | "
-            f"{lead.get('monthly_value_estimate','?')}/mo]: {name}"
+            "  Qualified [%s | %d/10 | %s/mo]: %s",
+            priority.upper(), score, lead.get("monthly_value_estimate", "?"), name,
         )
 
     METRICS["qualified"] = len(qualified)
-    log.info(f"\nAgent 3 Complete — Qualified: {len(qualified)} leads")
+    log.info("\nAgent 3 Complete — Qualified: %d leads", len(qualified))
     return qualified
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # AGENT 4 — STRATEGIC LEAD ASSIGNMENT
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 def _best_rep(lead: dict) -> dict:
+    """Return the best-matched rep with the lightest current load."""
     btype = lead.get("business_type", "")
     specialty_match = [
         r for r in SALES_REPS
@@ -1054,14 +1026,17 @@ def _best_rep(lead: dict) -> dict:
 
 
 def agent_assign_leads(leads: list[dict]) -> list[dict]:
-    log.info("\n" + "═" * 62)
+    log.info("\n" + "=" * 62)
     log.info("AGENT 4 — STRATEGIC LEAD ASSIGNMENT")
-    log.info("═" * 62)
+    log.info("=" * 62)
 
     priority_order = {"high": 0, "medium": 1, "low": 2}
     leads_sorted = sorted(
         [l for l in leads if l.get("status") == "Qualified"],
-        key=lambda x: (priority_order.get(x.get("priority", "low"), 2), -(x.get("ai_score") or 0)),
+        key=lambda x: (
+            priority_order.get(x.get("priority", "low"), 2),
+            -(x.get("ai_score") or 0),
+        ),
     )
 
     assigned: list[dict] = []
@@ -1086,28 +1061,31 @@ def agent_assign_leads(leads: list[dict]) -> list[dict]:
 
         assigned.append(lead)
         log.info(
-            f"  {lead.get('name')} [{lead.get('priority','?').upper()} | "
-            f"{lead.get('ai_score',0)}/10 | {lead.get('monthly_value_estimate','?')}/mo] "
-            f"→ {rep['name']}"
+            "  %s [%s | %d/10 | %s/mo] → %s",
+            lead.get("name"),
+            lead.get("priority", "?").upper(),
+            lead.get("ai_score", 0),
+            lead.get("monthly_value_estimate", "?"),
+            rep["name"],
         )
 
     METRICS["assigned"] = len(assigned)
-    log.info(f"\nAgent 4 Complete — Assigned: {len(assigned)} leads")
+    log.info("\nAgent 4 Complete — Assigned: %d leads", len(assigned))
     log.info("Rep loads this run:")
     for r in SALES_REPS:
-        log.info(f"  {r['name']}: {rep_load[r['id']]} leads")
+        log.info("  %s: %d leads", r["name"], rep_load[r["id"]])
     return assigned
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # AGENT 5 — OMNI OUTREACH
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 def _parse_monthly_value(estimate: str) -> int:
     """
-    FIX #3 — robust revenue parser using regex.
-    Handles: '$750-1200', '$1,200 - $1,800', '750', '1200+', etc.
-    Returns the midpoint of any range found, or the single value.
+    Robustly extract a numeric value from a revenue estimate string.
+    Handles formats like '$750-1200', '$1,200 - $1,800', '1200+', etc.
+    Returns the midpoint of any range, or the single value found.
     """
     if not estimate:
         return 0
@@ -1117,21 +1095,25 @@ def _parse_monthly_value(estimate: str) -> int:
     return sum(nums) // len(nums)
 
 
-def agent_launch_outreach(assigned: list[dict], captured: list[dict], qualified: list[dict]) -> None:
-    log.info("\n" + "═" * 62)
+def agent_launch_outreach(
+    assigned: list[dict],
+    captured: list[dict],
+    qualified: list[dict],
+) -> None:
+    log.info("\n" + "=" * 62)
     log.info("AGENT 5 — OMNI OUTREACH")
-    log.info("═" * 62)
+    log.info("=" * 62)
 
     today = datetime.now().strftime("%m/%d")
 
-    # ── Group leads by rep ──
+    # ── Group leads by assigned rep ──
     rep_leads: dict[str, list] = {r["name"]: [] for r in SALES_REPS}
     for lead in assigned:
         rep_name = lead.get("assigned_to", "")
         if rep_name in rep_leads:
             rep_leads[rep_name].append(lead)
 
-    # ── Rep SMS digest ──
+    # ── Rep digest SMS (one per rep, up to 8 leads summarised) ──
     for rep in SALES_REPS:
         rep_name  = rep["name"]
         to_phone  = rep.get("phone") or ALERT_PHONE
@@ -1142,21 +1124,21 @@ def agent_launch_outreach(assigned: list[dict], captured: list[dict], qualified:
         lines = [f"LeadFlow AI v4 | {rep_name}'s Leads — {today}\n"]
         for i, ld in enumerate(rep_items[:8], 1):
             lines.append(
-                f"{i}. {ld.get('name')} ({ld.get('city','')})\n"
-                f"   Score: {ld.get('ai_score',0)}/10 | {ld.get('priority','?').upper()} | "
-                f"Est: {ld.get('monthly_value_estimate','?')}/mo\n"
-                f"   Phone: {ld.get('phone','N/A')}\n"
-                f"   Best time: {ld.get('best_contact_time','?')}\n"
-                f"   Hook: {ld.get('best_hook','')[:80]}\n"
+                f"{i}. {ld.get('name')} ({ld.get('city', '')})\n"
+                f"   Score: {ld.get('ai_score', 0)}/10 | {ld.get('priority', '?').upper()} | "
+                f"Est: {ld.get('monthly_value_estimate', '?')}/mo\n"
+                f"   Phone: {ld.get('phone', 'N/A')}\n"
+                f"   Best time: {ld.get('best_contact_time', '?')}\n"
+                f"   Hook: {ld.get('best_hook', '')[:80]}\n"
             )
         if len(rep_items) > 8:
-            lines.append(f"…and {len(rep_items) - 8} more in your CRM.")
+            lines.append(f"...and {len(rep_items) - 8} more in your CRM.")
 
         send_sms(to_phone, "\n".join(lines))
 
-    # ── Individual outreach SMS for HIGH-priority leads ──
+    # ── Individual outreach SMS for high-priority leads ──
     highs = [l for l in assigned if l.get("priority") == "high" and l.get("outreach_sms")]
-    log.info(f"  Sending {min(len(highs), HIGH_PRIORITY_SMS)} individual outreach SMS")
+    log.info("  Sending %d individual outreach SMS", min(len(highs), HIGH_PRIORITY_SMS))
 
     for lead in highs[:HIGH_PRIORITY_SMS]:
         rep_phone = next(
@@ -1164,16 +1146,16 @@ def agent_launch_outreach(assigned: list[dict], captured: list[dict], qualified:
             ALERT_PHONE,
         )
         msg = (
-            f"🔥 HIGH PRIORITY LEAD — {lead.get('name')}\n"
-            f"Phone: {lead.get('phone', 'N/A')} | Score: {lead.get('ai_score',0)}/10\n"
-            f"City: {lead.get('city','')} | Est: {lead.get('monthly_value_estimate','?')}/mo\n"
-            f"Best time to call: {lead.get('best_contact_time','?')}\n\n"
-            f"AI Outreach SMS:\n{lead.get('outreach_sms','')}\n\n"
-            f"Email A: {lead.get('email_subject_a','')}\n"
-            f"Email B: {lead.get('email_subject_b','')}\n\n"
-            f"Voicemail:\n{lead.get('voicemail_script','')}"
+            f"HIGH PRIORITY LEAD — {lead.get('name')}\n"
+            f"Phone: {lead.get('phone', 'N/A')} | Score: {lead.get('ai_score', 0)}/10\n"
+            f"City: {lead.get('city', '')} | Est: {lead.get('monthly_value_estimate', '?')}/mo\n"
+            f"Best time to call: {lead.get('best_contact_time', '?')}\n\n"
+            f"AI Outreach SMS:\n{lead.get('outreach_sms', '')}\n\n"
+            f"Email A: {lead.get('email_subject_a', '')}\n"
+            f"Email B: {lead.get('email_subject_b', '')}\n\n"
+            f"Voicemail:\n{lead.get('voicemail_script', '')}"
         )
-        send_sms(rep_phone, msg)  # FIX #12 handled inside send_sms()
+        send_sms(rep_phone, msg)  # chunking handled inside send_sms()
         time.sleep(0.5)
 
     # ── CRM webhook push ──
@@ -1184,20 +1166,23 @@ def agent_launch_outreach(assigned: list[dict], captured: list[dict], qualified:
     # ── Slack rich digest ──
     top5 = sorted(assigned, key=lambda x: -(x.get("ai_score") or 0))[:5]
     top_lines = "\n".join(
-        f"• *{l.get('name')}* ({l.get('city')}) — "
-        f"{l.get('ai_score',0)}/10 | {l.get('priority','?').upper()} | "
-        f"{l.get('monthly_value_estimate','?')}/mo | → {l.get('assigned_to','?')}"
+        f"* {l.get('name')} ({l.get('city')}) — "
+        f"{l.get('ai_score', 0)}/10 | {l.get('priority', '?').upper()} | "
+        f"{l.get('monthly_value_estimate', '?')}/mo | -> {l.get('assigned_to', '?')}"
         for l in top5
     )
-
-    # FIX #3 — use robust parser
-    total_monthly = sum(_parse_monthly_value(l.get("monthly_value_estimate", "")) for l in assigned)
+    total_monthly = sum(
+        _parse_monthly_value(l.get("monthly_value_estimate", "")) for l in assigned
+    )
 
     slack_payload = {
         "blocks": [
             {
                 "type": "header",
-                "text": {"type": "plain_text", "text": f"LeadFlow AI v4 — Daily Report {datetime.now().strftime('%m/%d/%Y')}"}
+                "text": {
+                    "type": "plain_text",
+                    "text": f"LeadFlow AI v4 — Daily Report {datetime.now().strftime('%m/%d/%Y')}",
+                },
             },
             {
                 "type": "section",
@@ -1208,36 +1193,41 @@ def agent_launch_outreach(assigned: list[dict], captured: list[dict], qualified:
                     {"type": "mrkdwn", "text": f"*CRM Synced:* {METRICS['crm_pushed']}"},
                     {"type": "mrkdwn", "text": f"*SMS Sent:* {METRICS['sms_sent']}"},
                     {"type": "mrkdwn", "text": f"*Pipeline Est:* ${total_monthly:,}/mo"},
-                ]
+                ],
             },
             {
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": f"*Top 5 Leads:*\n{top_lines}"}
+                "text": {"type": "mrkdwn", "text": f"*Top 5 Leads:*\n{top_lines}"},
             },
             {
                 "type": "section",
                 "fields": [
-                    {"type": "mrkdwn", "text": "Rep Loads:\n" + "\n".join(
-                        f"{r['name']}: {rep_load[r['id']]} leads" for r in SALES_REPS
-                    )},
-                    {"type": "mrkdwn", "text": "Hot Niches:\n" + "\n".join(
-                        f"{niche}: {count}" for niche, count in sorted(
-                            METRICS["top_niches"].items(), key=lambda x: -x[1]
-                        )[:5]
-                    )},
+                    {
+                        "type": "mrkdwn",
+                        "text": "Rep Loads:\n" + "\n".join(
+                            f"{r['name']}: {rep_load[r['id']]} leads" for r in SALES_REPS
+                        ),
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": "Hot Niches:\n" + "\n".join(
+                            f"{niche}: {count}"
+                            for niche, count in sorted(
+                                METRICS["top_niches"].items(), key=lambda x: -x[1]
+                            )[:5]
+                        ),
+                    },
                 ],
             },
         ]
     }
-    if send_slack(slack_payload):
-        log.info("  Slack digest sent")
-
-    log.info(f"\nAgent 5 Complete — SMS: {METRICS['sms_sent']} | CRM: {METRICS['crm_pushed']}")
+    send_slack(slack_payload)
+    log.info("\nAgent 5 Complete — SMS: %d | CRM: %d", METRICS["sms_sent"], METRICS["crm_pushed"])
 
 
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 # AGENT 6 — STRATEGIC INTELLIGENCE LOOP
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
 
 INTEL_SYSTEM = """\
 You are a data-driven sales intelligence analyst for a digital marketing agency.
@@ -1262,35 +1252,32 @@ Respond ONLY with valid JSON — no preamble, no markdown:
 
 
 def agent_intelligence_loop(assigned: list[dict]) -> None:
-    log.info("\n" + "═" * 62)
+    log.info("\n" + "=" * 62)
     log.info("AGENT 6 — STRATEGIC INTELLIGENCE LOOP")
-    log.info("═" * 62)
+    log.info("=" * 62)
 
     if not assigned:
         log.info("  No assigned leads — skipping intelligence loop")
         return
 
-    # FIX #16 — reflect actual count used, not a hard-coded constant
     top_leads = sorted(assigned, key=lambda x: -(x.get("ai_score") or 0))[:INTEL_TOP_N]
-    log.info(f"  Analyzing top {len(top_leads)} leads for strategic brief")
+    log.info("  Analysing top %d leads for strategic brief", len(top_leads))
 
-    summary = f"""
-Run date:        {datetime.now().strftime('%Y-%m-%d')}
-Total captured:  {METRICS['captured']}
-Total qualified: {METRICS['qualified']}
-Total assigned:  {METRICS['assigned']}
-
-Top {len(top_leads)} leads this run:
-""" + "\n".join(
+    lead_lines = "\n".join(
         f"- {l.get('name')} | {l.get('business_type')} | {l.get('city')} | "
-        f"Score: {l.get('ai_score',0)}/10 | Pain: {l.get('pain_summary','')} | "
-        f"Est: {l.get('monthly_value_estimate','?')}/mo"
+        f"Score: {l.get('ai_score', 0)}/10 | Pain: {l.get('pain_summary', '')} | "
+        f"Est: {l.get('monthly_value_estimate', '?')}/mo"
         for l in top_leads
-    ) + f"""
-
-Hot niches (by lead volume): {json.dumps(METRICS['top_niches'])}
-Hot cities  (by lead volume): {json.dumps(METRICS['top_cities'])}
-"""
+    )
+    summary = (
+        f"Run date:        {datetime.now().strftime('%Y-%m-%d')}\n"
+        f"Total captured:  {METRICS['captured']}\n"
+        f"Total qualified: {METRICS['qualified']}\n"
+        f"Total assigned:  {METRICS['assigned']}\n\n"
+        f"Top {len(top_leads)} leads this run:\n{lead_lines}\n\n"
+        f"Hot niches (by lead volume): {json.dumps(METRICS['top_niches'])}\n"
+        f"Hot cities  (by lead volume): {json.dumps(METRICS['top_cities'])}\n"
+    )
 
     result = parse_json(ask_groq(INTEL_SYSTEM, summary, max_tokens=600, temperature=0.4))
 
@@ -1299,154 +1286,196 @@ Hot cities  (by lead volume): {json.dumps(METRICS['top_cities'])}
         return
 
     log.info("  Strategic Brief Generated:")
-    log.info(f"    Top Niche:  {result.get('top_opportunity_niche','')}")
-    log.info(f"    Top City:   {result.get('top_opportunity_city','')}")
-    log.info(f"    Insight:    {result.get('pattern_insight','')}")
-    log.info(f"    Revenue Opp:{result.get('revenue_opportunity','')}")
+    log.info("    Top Niche:   %s", result.get("top_opportunity_niche", ""))
+    log.info("    Top City:    %s", result.get("top_opportunity_city", ""))
+    log.info("    Insight:     %s", result.get("pattern_insight", ""))
+    log.info("    Revenue Opp: %s", result.get("revenue_opportunity", ""))
 
-    action_lines = "\n".join(f"• {a}" for a in result.get("action_items", []))
+    action_lines = "\n".join(f"* {a}" for a in result.get("action_items", []))
 
     slack_intel = {
         "blocks": [
             {
                 "type": "header",
-                "text": {"type": "plain_text", "text": f"🧠 Strategic Intel Brief — {datetime.now().strftime('%m/%d/%Y')}"}
+                "text": {
+                    "type": "plain_text",
+                    "text": f"Strategic Intel Brief — {datetime.now().strftime('%m/%d/%Y')}",
+                },
             },
             {
                 "type": "section",
                 "fields": [
-                    {"type": "mrkdwn", "text": f"*🔥 Top Niche to Target:*\n{result.get('top_opportunity_niche','')}"},
-                    {"type": "mrkdwn", "text": f"*📍 Top City to Target:*\n{result.get('top_opportunity_city','')}"},
-                ]
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Top Niche to Target:*\n{result.get('top_opportunity_niche', '')}",
+                    },
+                    {
+                        "type": "mrkdwn",
+                        "text": f"*Top City to Target:*\n{result.get('top_opportunity_city', '')}",
+                    },
+                ],
             },
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*💡 Pattern Insight:*\n{result.get('pattern_insight','')}"}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*💰 Revenue Opportunity:*\n{result.get('revenue_opportunity','')}"}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*📋 Recommended Pitch Angle:*\n{result.get('recommended_pitch_angle','')}"}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*✅ Action Items for Tomorrow:*\n{action_lines}"}},
-            {"type": "section", "text": {"type": "mrkdwn", "text": f"*🎯 Next Run Focus:*\n{result.get('next_run_focus','')}"}},
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Pattern Insight:*\n{result.get('pattern_insight', '')}",
+                },
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Revenue Opportunity:*\n{result.get('revenue_opportunity', '')}",
+                },
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Recommended Pitch Angle:*\n{result.get('recommended_pitch_angle', '')}",
+                },
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Action Items for Tomorrow:*\n{action_lines}",
+                },
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"*Next Run Focus:*\n{result.get('next_run_focus', '')}",
+                },
+            },
         ]
     }
     send_slack(slack_intel)
     log.info("  Intelligence brief sent to Slack")
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# MAIN PIPELINE  (FIX #17 — per-agent fault isolation)
-# ══════════════════════════════════════════════════════════════════════════════
+# ══════════════════════════════════════════════════════════════
+# MAIN PIPELINE  (per-agent fault isolation)
+# ══════════════════════════════════════════════════════════════
 
 def run_pipeline() -> None:
     start_time = datetime.now()
     METRICS["run_date"] = start_time.strftime("%Y-%m-%d %H:%M:%S CST")
 
-    log.info("\n" + "═" * 62)
-    log.info(f"LeadFlow AI v4.0 APEX — {METRICS['run_date']}")
+    log.info("\n" + "=" * 62)
+    log.info("LeadFlow AI v4.0 APEX — %s", METRICS["run_date"])
     if DRY_RUN:
         log.info("MODE: DRY RUN — no writes will occur")
-    log.info("═" * 62)
+    log.info("=" * 62)
 
-    # ── Preflight ──
+    # ── Preflight checks ──
     if not check_credentials():
         log.error("Missing required credentials — aborting.")
         sys.exit(1)
 
     log.info("\n=== GROQ CONNECTIVITY TEST ===")
-    test = ask_groq("You are a helpful assistant.", "Reply with exactly one word: READY", max_tokens=5)
+    test = ask_groq(
+        "You are a helpful assistant.",
+        "Reply with exactly one word: READY",
+        max_tokens=5,
+    )
     if not test:
         log.error("Groq connection failed — aborting.")
         sys.exit(1)
-    log.info(f"Groq: {test}")
+    log.info("Groq: %s", test)
 
     log.info("\n=== DEDUPLICATION PREFETCH ===")
     existing_fps = b44_list_existing()
-    log.info(f"Found {len(existing_fps)} existing fingerprints in CRM")
+    log.info("Found %d existing fingerprints in CRM", len(existing_fps))
 
-    # ── Agent 1 ──
+    # ── Agent 1: Capture ──
     captured: list[dict] = []
     try:
         captured = agent_capture_leads(existing_fps)
     except Exception as exc:
-        log.error(f"Agent 1 FAILED: {exc}")
+        log.error("Agent 1 FAILED: %s", exc)
         _record_error(f"Agent1 fatal: {exc}")
 
     time.sleep(2)
 
-    # ── Agent 2 ──
+    # ── Agent 2: Enrich ──
     enriched: list[dict] = captured
     if captured:
         try:
             enriched = agent_enrich_leads(captured)
         except Exception as exc:
-            log.error(f"Agent 2 FAILED: {exc} — using unenriched leads")
+            log.error("Agent 2 FAILED: %s — using unenriched leads", exc)
             _record_error(f"Agent2 fatal: {exc}")
 
     time.sleep(1)
 
-    # ── Agent 3 ──
+    # ── Agent 3: Qualify ──
     qualified: list[dict] = []
     if enriched:
         try:
             qualified = agent_qualify_leads(enriched)
         except Exception as exc:
-            log.error(f"Agent 3 FAILED: {exc}")
+            log.error("Agent 3 FAILED: %s", exc)
             _record_error(f"Agent3 fatal: {exc}")
 
     time.sleep(1)
 
-    # ── Agent 4 ──
+    # ── Agent 4: Assign ──
     assigned: list[dict] = []
     if qualified:
         try:
             assigned = agent_assign_leads(qualified)
         except Exception as exc:
-            log.error(f"Agent 4 FAILED: {exc}")
+            log.error("Agent 4 FAILED: %s", exc)
             _record_error(f"Agent4 fatal: {exc}")
 
     time.sleep(1)
 
-    # ── Agent 5 ──
+    # ── Agent 5: Outreach ──
     if assigned:
         try:
             agent_launch_outreach(assigned, captured, qualified)
         except Exception as exc:
-            log.error(f"Agent 5 FAILED: {exc}")
+            log.error("Agent 5 FAILED: %s", exc)
             _record_error(f"Agent5 fatal: {exc}")
 
     time.sleep(1)
 
-    # ── Agent 6 ──
+    # ── Agent 6: Intelligence loop ──
     try:
         agent_intelligence_loop(assigned)
     except Exception as exc:
-        log.error(f"Agent 6 FAILED: {exc}")
+        log.error("Agent 6 FAILED: %s", exc)
         _record_error(f"Agent6 fatal: {exc}")
 
-    # ── Final metrics  (FIX #18 — written AFTER all outreach) ──
+    # ── Final metrics (written AFTER all outreach so SMS count is accurate) ──
     duration = int((datetime.now() - start_time).total_seconds())
     METRICS["duration_seconds"] = duration
 
-    log.info("\n" + "═" * 62)
+    log.info("\n" + "=" * 62)
     log.info("LeadFlow AI v4.0 APEX — Run Complete")
-    log.info("═" * 62)
-    log.info(f"Duration:    {duration}s")
-    log.info(f"Cities:      {METRICS['cities_queried']}")
-    log.info(f"Niches:      {METRICS['niches_queried']}")
-    log.info(f"Queries:     {METRICS['total_queries']}")
-    log.info(f"Captured:    {METRICS['captured']}")
-    log.info(f"Enriched:    {METRICS['enriched']}")
-    log.info(f"Qualified:   {METRICS['qualified']}")
-    log.info(f"Assigned:    {METRICS['assigned']}")
-    log.info(f"SMS Sent:    {METRICS['sms_sent']}")
-    log.info(f"CRM Synced:  {METRICS['crm_pushed']}")
-    log.info(f"Errors:      {len(METRICS['errors'])}")
-    log.info("═" * 62)
+    log.info("=" * 62)
+    log.info("Duration:    %ds",   duration)
+    log.info("Cities:      %d",    METRICS["cities_queried"])
+    log.info("Niches:      %d",    METRICS["niches_queried"])
+    log.info("Queries:     %d",    METRICS["total_queries"])
+    log.info("Captured:    %d",    METRICS["captured"])
+    log.info("Enriched:    %d",    METRICS["enriched"])
+    log.info("Qualified:   %d",    METRICS["qualified"])
+    log.info("Assigned:    %d",    METRICS["assigned"])
+    log.info("SMS Sent:    %d",    METRICS["sms_sent"])
+    log.info("CRM Synced:  %d",    METRICS["crm_pushed"])
+    log.info("Errors:      %d",    len(METRICS["errors"]))
+    log.info("=" * 62)
 
-    # Write metrics JSON AFTER all outreach is complete
     metrics_path = f"leadflow_metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
     with open(metrics_path, "w") as f:
         json.dump(METRICS, f, indent=2)
-    log.info(f"Metrics written: {metrics_path}")
+    log.info("Metrics written: %s", metrics_path)
 
-    # Final operator SMS
+    # Final operator summary SMS
     send_sms(
         ALERT_PHONE,
         f"LeadFlow AI v4 — Run Complete\n"
@@ -1454,7 +1483,7 @@ def run_pipeline() -> None:
         f"Captured: {METRICS['captured']} | Qualified: {METRICS['qualified']}\n"
         f"Assigned: {METRICS['assigned']} | SMS: {METRICS['sms_sent']}\n"
         f"CRM: {METRICS['crm_pushed']} | Errors: {len(METRICS['errors'])}\n"
-        f"Duration: {duration}s"
+        f"Duration: {duration}s",
     )
 
 
