@@ -79,7 +79,7 @@ jobs:
           echo "All required secrets present."
 
       - name: Run LeadFlow AI v4 APEX
-        run: python WORKINGleadflow.py
+        run: python leadflow_agent_v4.py
 
       - name: Upload metrics artifact
         if: always()
