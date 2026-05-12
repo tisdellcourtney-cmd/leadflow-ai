@@ -31,7 +31,7 @@ from typing import Optional
 
 import requests
 from groq import Groq
-from serpapi import GoogleSearch
+# ValueSERP is used instead of SerpAPI — pip install valueserp
 from twilio.rest import Client as TwilioClient
 
 # ══════════════════════════════════════════════════════════════
@@ -53,7 +53,7 @@ log = logging.getLogger("LeadFlow.v4")
 # ══════════════════════════════════════════════════════════════
 
 GROQ_API_KEY    = os.getenv("GROQ_API_KEY",        "").strip()
-SERPAPI_API_KEY = os.getenv("SERPAPI_API_KEY",      "").strip()
+SERPAPI_API_KEY = os.getenv("VALUESERP_API_KEY",    "").strip()  # ValueSERP key
 BASE44_API_KEY  = os.getenv("BASE44_API_KEY",       "").strip()
 BASE44_APP_ID   = os.getenv("BASE44_APP_ID",        "").strip()
 TWILIO_SID      = os.getenv("TWILIO_ACCOUNT_SID",  "").strip()
@@ -264,7 +264,7 @@ def check_credentials() -> bool:
     log.info("=== CREDENTIAL CHECK ===")
     required = {
         "GROQ_API_KEY":        GROQ_API_KEY,
-        "SERPAPI_API_KEY":     SERPAPI_API_KEY,
+        "VALUESERP_API_KEY":   SERPAPI_API_KEY,
         "BASE44_API_KEY":      BASE44_API_KEY,
         "BASE44_APP_ID":       BASE44_APP_ID,
         "TWILIO_ACCOUNT_SID":  TWILIO_SID,
@@ -527,16 +527,24 @@ def push_crm(lead: dict) -> bool:
 # AGENT 1 — APEX LEAD CAPTURE
 # ══════════════════════════════════════════════════════════════
 
+def _valueserp_request(params: dict) -> dict:
+    """Shared ValueSERP HTTP helper — simpler than the SDK."""
+    params["api_key"] = SERPAPI_API_KEY
+    r = requests.get("https://api.valueserp.com/search", params=params, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
 def _serpapi_maps(query: str) -> list[dict]:
     try:
-        results = GoogleSearch({
-            "engine":  "google_maps",
-            "q":       query,
-            "api_key": SERPAPI_API_KEY,
-            "type":    "search",
-        }).get_dict()
+        results = _valueserp_request({
+            "search_type": "places",
+            "q":           query,
+            "location":    "Alabama,United States",
+            "num":         str(LEADS_PER_QUERY),
+        })
         leads = []
-        for item in results.get("local_results", [])[:LEADS_PER_QUERY]:
+        for item in results.get("places_results", [])[:LEADS_PER_QUERY]:
             leads.append({
                 "name":      item.get("title", "Unknown"),
                 "phone":     item.get("phone", ""),
@@ -546,7 +554,7 @@ def _serpapi_maps(query: str) -> list[dict]:
                 "reviews":   item.get("reviews", 0),
                 "place_id":  item.get("place_id", ""),
                 "thumbnail": item.get("thumbnail", ""),
-                "hours":     item.get("hours", ""),
+                "hours":     "",
                 "source":    "google_maps",
             })
         return leads
@@ -562,12 +570,10 @@ _ORGANIC_SKIP = ("yelp.com", "yellowpages", "bbb.org", "manta.com")
 
 def _serpapi_organic(query: str) -> list[dict]:
     try:
-        results = GoogleSearch({
-            "engine":  "google",
-            "q":       query,
-            "api_key": SERPAPI_API_KEY,
-            "num":     5,
-        }).get_dict()
+        results = _valueserp_request({
+            "q":   query,
+            "num": "5",
+        })
         leads = []
         for item in results.get("organic_results", []):
             link = item.get("link", "")
@@ -729,12 +735,7 @@ def _social_signals(name: str, city: str) -> dict:
     query     = f"{slug} {city_slug} (facebook OR instagram OR yelp OR google maps)"
     signals   = {"facebook": False, "instagram": False, "yelp": False}
     try:
-        results = GoogleSearch({
-            "engine":  "google",
-            "q":       query,
-            "api_key": SERPAPI_API_KEY,
-            "num":     5,
-        }).get_dict()
+        results = _valueserp_request({"q": query, "num": "5"})
         for item in results.get("organic_results", []):
             link = item.get("link", "").lower()
             if "facebook.com"  in link: signals["facebook"]  = True
@@ -749,12 +750,7 @@ def _competitor_intel(name: str, btype: str, city: str) -> dict:
     bname_slug = name.lower().replace(" ", "").replace("'", "")
     intel      = {"top_competitor": "", "lead_owns_top_result": False}
     try:
-        results = GoogleSearch({
-            "engine":  "google",
-            "q":       f"{btype} {city}",
-            "api_key": SERPAPI_API_KEY,
-            "num":     3,
-        }).get_dict()
+        results = _valueserp_request({"q": f"{btype} {city}", "num": "3"})
         organic = results.get("organic_results", [])
         if organic:
             top_link  = organic[0].get("link", "").lower()
