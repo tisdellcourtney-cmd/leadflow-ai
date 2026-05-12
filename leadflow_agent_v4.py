@@ -455,15 +455,28 @@ def _send_sms_chunk(to: str, body: str) -> bool:
             METRICS["sms_sent"] += 1
         return True
     except Exception as exc:
-        log.error("Twilio error: %s", exc)
-        _record_error(f"Twilio: {exc}")
+        err_str = str(exc)
+        # Gracefully skip unverified-number errors on Twilio trial accounts.
+        # These are expected until the account is upgraded — not a pipeline failure.
+        if "21608" in err_str or "unverified" in err_str.lower():
+            log.warning(
+                "  SMS skipped (Twilio trial — unverified number %s). "
+                "Upgrade Twilio account to enable SMS to any number.", to
+            )
+        else:
+            log.error("Twilio error: %s", exc)
+            _record_error(f"Twilio: {exc}")
         return False
 
 
 def send_sms(to: str, body: str) -> bool:
     """
-    Send an SMS, splitting into ≤ SMS_CHUNK_SIZE chunks at newline boundaries
+    Send an SMS, splitting into <= SMS_CHUNK_SIZE chunks at newline boundaries
     so Twilio's 1600-char hard limit never silently truncates content.
+
+    NOTE: On Twilio trial accounts, SMS to unverified numbers is skipped
+    gracefully with a warning rather than an error. Upgrade Twilio to enable
+    full SMS outreach.
     """
     if DRY_RUN:
         log.info("  [DRY RUN] SMS → %s: %s…", to, body[:80])
